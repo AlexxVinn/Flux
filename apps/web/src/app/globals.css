@@ -1,0 +1,118 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-sans: "Instrument Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+  --flux-border: rgba(255, 255, 255, 0.06);
+  --flux-border-hover: rgba(255, 255, 255, 0.09);
+  --flux-border-active: rgba(255, 255, 255, 0.11);
+  --flux-surface-raised: rgba(255, 255, 255, 0.04);
+  --flux-radius: 0.5rem;
+  --flux-radius-sm: 0.375rem;
+}
+
+html,
+body {
+  height: 100%;
+  background: #080a0f;
+  color: #e8ecf4;
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+    border: 1.5px solid transparent;
+    background-clip: padding-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(255, 255, 255, 0.2);
+  }
+
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
+@layer components {
+  .flux-panel-header {
+    background-color: #000000;
+    border-bottom: 1px solid var(--flux-border);
+    background-image:
+      radial-gradient(
+        circle at center,
+        rgba(255, 255, 255, 0.028) 0.55px,
+        transparent 0.55px
+      ),
+      linear-gradient(
+        to right,
+        rgba(255, 255, 255, 0.014) 1px,
+        transparent 1px
+      ),
+      linear-gradient(
+        to bottom,
+        rgba(255, 255, 255, 0.014) 1px,
+        transparent 1px
+      );
+    background-size: 12px 12px;
+  }
+
+  .flux-scroll {
+    scrollbar-gutter: stable;
+  }
+
+  .flux-btn {
+    border-radius: var(--flux-radius-sm);
+    border: 1px solid var(--flux-border);
+    background-color: #000000;
+    transition:
+      border-color 0.15s ease,
+      background-color 0.15s ease,
+      color 0.15s ease;
+  }
+
+  .flux-btn:hover {
+    border-color: var(--flux-border-hover);
+    background-color: rgba(255, 255, 255, 0.03);
+  }
+
+  .flux-btn-active {
+    border-color: var(--flux-border-active);
+    background-color: var(--flux-surface-raised);
+  }
+
+  .flux-border-subtle {
+    border-color: var(--flux-border);
+  }
+}

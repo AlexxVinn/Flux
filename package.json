@@ -1,0 +1,20 @@
+{
+  "name": "flux",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Flux — collaborative physics sandbox",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "dev": "pnpm --filter @flux/web dev",
+    "dev:web": "pnpm --filter @flux/web dev",
+    "dev:server": "pnpm --filter @flux/server dev",
+    "typecheck": "pnpm -r run typecheck"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}
