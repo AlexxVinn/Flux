@@ -1,6 +1,8 @@
 node_modules
 dist
 .turbo
+*.tsbuildinfo
+apps/web/.next
 *.log
 .env
 .env.*
