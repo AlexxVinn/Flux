@@ -4,7 +4,12 @@ import type { CSSProperties } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-export type RightPanelRegionId = "scene" | "properties" | "activity" | "discussion";
+export type RightPanelRegionId =
+  | "scene"
+  | "properties"
+  | "members"
+  | "activity"
+  | "discussion";
 
 export interface RegionLayout {
   collapsed: boolean;
@@ -23,6 +28,7 @@ interface RightPanelState {
   sceneDebugOpen: boolean;
 
   setWidth: (width: number) => void;
+  adjustWidth: (delta: number) => void;
   setLayoutMode: (mode: RightPanelLayoutMode) => void;
   focusRegion: (id: RightPanelRegionId) => void;
   toggleRegion: (id: RightPanelRegionId) => void;
@@ -44,6 +50,7 @@ export const RIGHT_PANEL_WIDTH_DEFAULT = 340;
 export const REGION_ORDER: RightPanelRegionId[] = [
   "scene",
   "properties",
+  "members",
   "activity",
   "discussion",
 ];
@@ -51,6 +58,7 @@ export const REGION_ORDER: RightPanelRegionId[] = [
 const REGION_MIN: Record<RightPanelRegionId, number> = {
   scene: 100,
   properties: 120,
+  members: 100,
   activity: 64,
   discussion: 120,
 };
@@ -60,6 +68,7 @@ const MIN_SHARE = 0.35;
 const DEFAULT_REGIONS: Record<RightPanelRegionId, RegionLayout> = {
   scene: { collapsed: false, share: 2 },
   properties: { collapsed: false, share: 2.5 },
+  members: { collapsed: false, share: 2 },
   activity: { collapsed: false, share: 1.2 },
   discussion: { collapsed: false, share: 2.3 },
 };
@@ -125,6 +134,12 @@ export const useRightPanelStore = create<RightPanelState>()(
 
       setWidth: (width) => set({ width: clampWidth(width) }),
 
+      adjustWidth: (delta) =>
+        set((s) => {
+          if (delta === 0) return s;
+          return { width: clampWidth(s.width - delta) };
+        }),
+
       setLayoutMode: (layoutMode) => set({ layoutMode }),
 
       focusRegion: (id) =>
@@ -189,22 +204,28 @@ export const useRightPanelStore = create<RightPanelState>()(
     }),
     {
       name: "flux_right_panel",
-      version: 1,
+      version: 2,
       migrate: (persisted, version) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         const state = persisted as Record<string, unknown>;
-        if (version < 1 && state.regions && typeof state.regions === "object") {
-          return {
-            ...state,
-            regions: migrateLegacyRegions(
-              state.regions as Record<
-                string,
-                { collapsed?: boolean; height?: number; share?: number }
-              >,
-            ),
-          };
+        let regions =
+          version < 1 && state.regions && typeof state.regions === "object"
+            ? migrateLegacyRegions(
+                state.regions as Record<
+                  string,
+                  { collapsed?: boolean; height?: number; share?: number }
+                >,
+              )
+            : {
+                ...DEFAULT_REGIONS,
+                ...(state.regions as Record<RightPanelRegionId, RegionLayout> | undefined),
+              };
+
+        if (version < 2 && !regions.members) {
+          regions = { ...regions, members: { ...DEFAULT_REGIONS.members } };
         }
-        return persisted;
+
+        return { ...state, regions };
       },
     },
   ),

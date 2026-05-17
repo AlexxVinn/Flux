@@ -44,6 +44,17 @@ export interface RoomMembership {
   displayName: string;
 }
 
+/** Active row in `room_members` (roster / moderation). */
+export interface RoomMember {
+  id: string;
+  roomId: string;
+  userId: string | null;
+  guestId: string | null;
+  role: MemberRole;
+  displayName: string;
+  joinedAt: string;
+}
+
 export interface CreateRoomRequest {
   title: string;
   module?: string;

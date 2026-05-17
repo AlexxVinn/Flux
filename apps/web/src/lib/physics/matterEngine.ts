@@ -10,16 +10,21 @@ import type {
 } from "./types";
 import { nextEntityName, resetNameCounters, reserveEntityName } from "./entityNames";
 import {
+  ROPE_GRAVITY_SCALE,
   ROPE_LINK_DAMPING,
   ROPE_LINK_STIFFNESS,
-  ROPE_SEGMENT_DENSITY,
-  ROPE_SEGMENT_FRICTION,
-  ROPE_SEGMENT_RADIUS,
-  ROPE_SEGMENT_RESTITUTION,
-  ROPE_SEGMENTS_MAX,
-  ROPE_SEGMENTS_MIN,
-  ROPE_SPACING_TARGET,
+  ROPE_VERLET_SUBSTEPS,
 } from "./ropeDefaults";
+import { anchorCollisionRadius, anchorSurfaceWorld } from "./ropeGeometry";
+import { computeRopeParticleLayout } from "./ropeLayout";
+import { SCENE_BODY_COLLISION_FILTER } from "./ropeCollisionFilters";
+import {
+  createVerletRope,
+  reinitializeVerletRope,
+  stepVerletRope,
+  type RopeSimContext,
+  type VerletRope,
+} from "./ropeVerlet";
 import {
   DEFAULT_SPRING_DAMPING,
   DEFAULT_SPRING_STIFFNESS,
@@ -60,6 +65,8 @@ interface InternalSpring {
   constraint: Matter.Constraint;
   bodyA: string;
   bodyB: string;
+  anchorA: { x: number; y: number };
+  anchorB: { x: number; y: number };
 }
 
 interface InternalRope {
@@ -68,12 +75,12 @@ interface InternalRope {
   visible: boolean;
   bodyA: string;
   bodyB: string;
+  anchorA: { x: number; y: number };
+  anchorB: { x: number; y: number };
   segmentCount: number;
   linkStiffness: number;
   linkDamping: number;
-  collisionGroup: number;
-  segmentIds: string[];
-  constraints: Matter.Constraint[];
+  verlet: VerletRope;
 }
 
 interface InternalBound {
@@ -110,7 +117,7 @@ export class MatterSimulationEngine {
   private bodies = new Map<string, InternalBody>();
   private springs = new Map<string, InternalSpring>();
   private ropes = new Map<string, InternalRope>();
-  private ropeGroupSeq = 0;
+  private sceneCollidersCache: Matter.Body[] | null = null;
   private bounds: InternalBound[] = [];
   private idCounter = 0;
   private gravityEnabled = true;
@@ -120,6 +127,8 @@ export class MatterSimulationEngine {
   private dragOffset = { x: 0, y: 0 };
   private dragPosition = { x: 0, y: 0 };
   private dragSleepThreshold: number | null = null;
+  /** Linear / angular velocity before drag — restored on {@link endDrag}. */
+  private dragSavedMotion: { vx: number; vy: number; av: number } | null = null;
   tick = 0;
 
   constructor(options: MatterEngineOptions = {}) {
@@ -137,8 +146,107 @@ export class MatterSimulationEngine {
     this.createBounds(this.worldWidth, this.worldHeight);
   }
 
+  private getSceneColliders(): Matter.Body[] {
+    if (this.sceneCollidersCache) return this.sceneCollidersCache;
+    const colliders: Matter.Body[] = [];
+    for (const bound of this.bounds) {
+      if (bound.visible) colliders.push(bound.body);
+    }
+    for (const ent of this.bodies.values()) {
+      if (!ent.visible || ent.entityKind === "ropeSegment") continue;
+      colliders.push(ent.body);
+    }
+    this.sceneCollidersCache = colliders;
+    return colliders;
+  }
+
+  private invalidateColliderCache(): void {
+    this.sceneCollidersCache = null;
+  }
+
+  /** Rope tension uses applyForce; must be cleared when paused or before each step. */
+  clearBodyForces(): void {
+    for (const ent of this.bodies.values()) {
+      if (!ent.visible) continue;
+      Matter.Body.set(ent.body, {
+        force: { x: 0, y: 0 },
+        torque: 0,
+      });
+    }
+  }
+
+  private simulateVerletRopes(dtSec: number): void {
+    const g = this.engine.gravity;
+    const gravityY = this.gravityEnabled ? (g.y ?? 0) * (g.scale ?? 0.001) * 1000 * ROPE_GRAVITY_SCALE : 0;
+    const baseColliders = this.getSceneColliders();
+    const subDt = dtSec / ROPE_VERLET_SUBSTEPS;
+    const lastSub = ROPE_VERLET_SUBSTEPS - 1;
+
+    for (let sub = 0; sub < ROPE_VERLET_SUBSTEPS; sub++) {
+      for (const rope of this.ropes.values()) {
+        if (!rope.visible) continue;
+        const entA = this.bodies.get(rope.bodyA);
+        const entB = this.bodies.get(rope.bodyB);
+        if (!entA?.visible || !entB?.visible) continue;
+
+        const surfA = this.localPointToWorld(entA.body, rope.anchorA.x, rope.anchorA.y);
+        const surfB = this.localPointToWorld(entB.body, rope.anchorB.x, rope.anchorB.y);
+        const labelA = entA.body.label ?? rope.bodyA;
+        const labelB = entB.body.label ?? rope.bodyB;
+        const exclude = new Set([labelA, labelB]);
+
+        const ctx: RopeSimContext = {
+          gravityX: (g.x ?? 0) * (g.scale ?? 0.001) * 1000 * ROPE_GRAVITY_SCALE,
+          gravityY,
+          colliders: baseColliders,
+          excludeLabels: exclude,
+        };
+
+        const { forceA, forceB } = stepVerletRope(
+          rope.verlet,
+          surfA,
+          surfB,
+          entA.body.velocity,
+          entB.body.velocity,
+          ctx,
+          subDt,
+        );
+
+        if (sub !== lastSub) continue;
+
+        if (!entA.body.isStatic) {
+          Matter.Body.applyForce(entA.body, surfA, {
+            x: forceA.x * entA.body.mass,
+            y: forceA.y * entA.body.mass,
+          });
+        }
+        if (!entB.body.isStatic) {
+          Matter.Body.applyForce(entB.body, surfB, {
+            x: forceB.x * entB.body.mass,
+            y: forceB.y * entB.body.mass,
+          });
+        }
+      }
+    }
+  }
+
   /** Viewport size changes do not alter world bounds; camera handles view. */
   resize(_width: number, _height: number): void {}
+
+  private worldPointToBodyLocal(body: Matter.Body, wx: number, wy: number): Matter.Vector {
+    const dx = wx - body.position.x;
+    const dy = wy - body.position.y;
+    return Matter.Vector.rotate({ x: dx, y: dy }, -body.angle);
+  }
+
+  private localPointToWorld(
+    body: Matter.Body,
+    lx: number,
+    ly: number,
+  ): { x: number; y: number } {
+    const rotated = Matter.Vector.rotate({ x: lx, y: ly }, body.angle);
+    return { x: body.position.x + rotated.x, y: body.position.y + rotated.y };
+  }
 
   private createBounds(width: number, height: number): void {
     const t = 60;
@@ -155,6 +263,7 @@ export class MatterSimulationEngine {
         friction: 0.8,
         restitution: 0.1,
         label: id,
+        collisionFilter: SCENE_BODY_COLLISION_FILTER,
       });
       const displayName = nextEntityName("wall");
       reserveEntityName(displayName);
@@ -208,6 +317,10 @@ export class MatterSimulationEngine {
       restitution: 0.12,
       label: labelId,
     });
+    compound.collisionFilter = {
+      ...compound.collisionFilter,
+      ...SCENE_BODY_COLLISION_FILTER,
+    };
     Matter.Body.setAngle(compound, 0);
     Matter.Sleeping.set(compound, false);
     return compound;
@@ -341,6 +454,12 @@ export class MatterSimulationEngine {
     width: number,
     height: number,
   ): void {
+    if (entityKind !== "ropeSegment") {
+      body.collisionFilter = {
+        ...body.collisionFilter,
+        ...SCENE_BODY_COLLISION_FILTER,
+      };
+    }
     this.bodies.set(id, {
       id,
       shape,
@@ -352,21 +471,32 @@ export class MatterSimulationEngine {
       height,
     });
     Matter.World.add(this.world, body);
+    this.invalidateColliderCache();
   }
 
   connectSpring(
     bodyAId: string,
     bodyBId: string,
-    options?: { length?: number; stiffness?: number; damping?: number; id?: string },
+    options?: {
+      length?: number;
+      stiffness?: number;
+      damping?: number;
+      id?: string;
+      pointA?: { x: number; y: number };
+      pointB?: { x: number; y: number };
+    },
   ): string | null {
     const a = this.bodies.get(bodyAId);
     const b = this.bodies.get(bodyBId);
     if (!a || !b || !a.visible || !b.visible) return null;
+
+    const pointA = options?.pointA ?? { x: 0, y: 0 };
+    const pointB = options?.pointB ?? { x: 0, y: 0 };
+    const wA = this.localPointToWorld(a.body, pointA.x, pointA.y);
+    const wB = this.localPointToWorld(b.body, pointB.x, pointB.y);
     const dist =
-      options?.length ??
-      Matter.Vector.magnitude(
-        Matter.Vector.sub(b.body.position, a.body.position),
-      );
+      options?.length ?? Math.max(20, Math.hypot(wB.x - wA.x, wB.y - wA.y));
+
     const id =
       typeof options?.id === "string" && options.id.length > 0
         ? options.id
@@ -376,6 +506,8 @@ export class MatterSimulationEngine {
     const constraint = Matter.Constraint.create({
       bodyA: a.body,
       bodyB: b.body,
+      pointA,
+      pointB,
       length: Math.max(dist, 20),
       stiffness: options?.stiffness ?? DEFAULT_SPRING_STIFFNESS,
       damping: options?.damping ?? DEFAULT_SPRING_DAMPING,
@@ -387,6 +519,8 @@ export class MatterSimulationEngine {
       constraint,
       bodyA: bodyAId,
       bodyB: bodyBId,
+      anchorA: { ...pointA },
+      anchorB: { ...pointB },
     });
     Matter.World.add(this.world, constraint);
     return id;
@@ -401,6 +535,8 @@ export class MatterSimulationEngine {
       segmentCount?: number;
       linkStiffness?: number;
       linkDamping?: number;
+      pointA?: { x: number; y: number };
+      pointB?: { x: number; y: number };
     },
   ): string | null {
     const a = this.bodies.get(bodyAId);
@@ -408,16 +544,47 @@ export class MatterSimulationEngine {
     if (!a || !b || !a.visible || !b.visible) return null;
     if (a.entityKind === "ropeSegment" || b.entityKind === "ropeSegment") return null;
 
-    const pa = a.body.position;
-    const pb = b.body.position;
-    const dx = pb.x - pa.x;
-    const dy = pb.y - pa.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist < 1e-3) return null;
+    const ra = anchorCollisionRadius(a.width, a.height, a.shape);
+    const rb = anchorCollisionRadius(b.width, b.height, b.shape);
 
-    let nSeg =
-      options?.segmentCount ?? Math.max(1, Math.round(dist / ROPE_SPACING_TARGET));
-    nSeg = Math.max(ROPE_SEGMENTS_MIN, Math.min(ROPE_SEGMENTS_MAX, nSeg));
+    let pointA: { x: number; y: number };
+    let pointB: { x: number; y: number };
+    let surfA: { x: number; y: number };
+    let surfB: { x: number; y: number };
+    let span: number;
+
+    if (options?.pointA && options?.pointB) {
+      pointA = { ...options.pointA };
+      pointB = { ...options.pointB };
+      surfA = this.localPointToWorld(a.body, pointA.x, pointA.y);
+      surfB = this.localPointToWorld(b.body, pointB.x, pointB.y);
+      span = Math.hypot(surfB.x - surfA.x, surfB.y - surfA.y);
+    } else {
+      const pa = a.body.position;
+      const pb = b.body.position;
+      const dx = pb.x - pa.x;
+      const dy = pb.y - pa.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 1e-3) return null;
+      const ux = dx / dist;
+      const uy = dy / dist;
+      surfA = anchorSurfaceWorld(pa.x, pa.y, ux, uy, ra, true);
+      surfB = anchorSurfaceWorld(pb.x, pb.y, ux, uy, rb, false);
+      pointA = this.worldPointToBodyLocal(a.body, surfA.x, surfA.y);
+      pointB = this.worldPointToBodyLocal(b.body, surfB.x, surfB.y);
+      span = Math.hypot(surfB.x - surfA.x, surfB.y - surfA.y);
+    }
+
+    if (span < 1e-3) return null;
+
+    const layout = computeRopeParticleLayout(span, options?.segmentCount);
+    const verlet = createVerletRope(
+      surfA,
+      surfB,
+      layout.pointCount,
+      layout.segmentLength,
+      layout.radius,
+    );
 
     const id =
       typeof options?.id === "string" && options.id.length > 0
@@ -427,69 +594,18 @@ export class MatterSimulationEngine {
     const displayName = options?.displayName ?? nextEntityName("rope");
     if (options?.displayName) reserveEntityName(options.displayName);
 
-    const stiffness = options?.linkStiffness ?? ROPE_LINK_STIFFNESS;
-    const damping = options?.linkDamping ?? ROPE_LINK_DAMPING;
-    const collisionGroup = -(++this.ropeGroupSeq);
-    const linkLen = dist / (nSeg + 1);
-
-    const segmentIds: string[] = [];
-    for (let i = 0; i < nSeg; i++) {
-      const t = (i + 1) / (nSeg + 1);
-      const sx = pa.x + dx * t;
-      const sy = pa.y + dy * t;
-      const segId = this.nextId("ropeSeg");
-      const segBody = Matter.Bodies.circle(sx, sy, ROPE_SEGMENT_RADIUS, {
-        label: segId,
-        friction: ROPE_SEGMENT_FRICTION,
-        frictionStatic: ROPE_SEGMENT_FRICTION,
-        restitution: ROPE_SEGMENT_RESTITUTION,
-        frictionAir: 0.02,
-        density: ROPE_SEGMENT_DENSITY,
-        collisionFilter: { group: collisionGroup },
-      });
-      segBody.plugin = { ...(segBody.plugin ?? {}), fluxRopeId: id };
-      this.registerBody(
-        segId,
-        "circle",
-        "ropeSegment",
-        `${displayName}·${i + 1}`,
-        segBody,
-        ROPE_SEGMENT_RADIUS * 2,
-        ROPE_SEGMENT_RADIUS * 2,
-      );
-      segmentIds.push(segId);
-    }
-
-    const chainBodies: Matter.Body[] = [
-      a.body,
-      ...segmentIds.map((sid) => this.bodies.get(sid)!.body),
-      b.body,
-    ];
-    const constraints: Matter.Constraint[] = [];
-    for (let i = 0; i < chainBodies.length - 1; i++) {
-      const c = Matter.Constraint.create({
-        bodyA: chainBodies[i]!,
-        bodyB: chainBodies[i + 1]!,
-        length: linkLen,
-        stiffness,
-        damping,
-      });
-      constraints.push(c);
-      Matter.World.add(this.world, c);
-    }
-
     this.ropes.set(id, {
       id,
       displayName,
       visible: true,
       bodyA: bodyAId,
       bodyB: bodyBId,
-      segmentCount: nSeg,
-      linkStiffness: stiffness,
-      linkDamping: damping,
-      collisionGroup,
-      segmentIds,
-      constraints,
+      anchorA: { ...pointA },
+      anchorB: { ...pointB },
+      segmentCount: layout.interiorCount,
+      linkStiffness: options?.linkStiffness ?? ROPE_LINK_STIFFNESS,
+      linkDamping: options?.linkDamping ?? ROPE_LINK_DAMPING,
+      verlet,
     });
 
     return id;
@@ -503,26 +619,15 @@ export class MatterSimulationEngine {
   }
 
   removeRope(id: string): void {
-    const rope = this.ropes.get(id);
-    if (!rope) return;
-    for (const c of rope.constraints) {
-      Matter.World.remove(this.world, c);
-    }
-    for (const segId of rope.segmentIds) {
-      const ent = this.bodies.get(segId);
-      if (ent?.visible) Matter.World.remove(this.world, ent.body);
-      this.bodies.delete(segId);
-    }
     this.ropes.delete(id);
   }
 
-  /** Resolve parent rope when picking a segment body. */
-  ropeIdForSegmentBody(bodyId: string): string | null {
-    const e = this.bodies.get(bodyId);
-    if (!e || e.entityKind !== "ropeSegment") return null;
-    const p = e.body.plugin as { fluxRopeId?: string } | undefined;
-    return p?.fluxRopeId ?? null;
+  /** @deprecated Verlet ropes have no Matter segment bodies. */
+  ropeIdForSegmentBody(_bodyId: string): string | null {
+    return null;
   }
+
+  renameEntity(id: string, displayName: string): boolean {
     const body = this.bodies.get(id);
     if (body) {
       reserveEntityName(displayName);
@@ -592,24 +697,10 @@ export class MatterSimulationEngine {
   setRopeVisible(id: string, visible: boolean): void {
     const rope = this.ropes.get(id);
     if (!rope || rope.visible === visible) return;
-    const a = this.bodies.get(rope.bodyA);
-    const b = this.bodies.get(rope.bodyB);
-    const endpointsVisible = a?.visible && b?.visible;
-    if (!visible) {
-      for (const c of rope.constraints) Matter.World.remove(this.world, c);
-      for (const segId of rope.segmentIds) {
-        const s = this.bodies.get(segId);
-        if (s?.visible) Matter.World.remove(this.world, s.body);
-      }
-    } else if (endpointsVisible) {
-      for (const c of rope.constraints) Matter.World.add(this.world, c);
-      for (const segId of rope.segmentIds) {
-        const s = this.bodies.get(segId);
-        if (s?.visible) Matter.World.add(this.world, s.body);
-      }
-    }
     rope.visible = visible;
   }
+
+  setBoundVisible(id: string, visible: boolean): void {
     const bound = this.bounds.find((b) => b.id === id);
     if (!bound || bound.visible === visible) return;
     if (!visible) Matter.World.remove(this.world, bound.body);
@@ -648,26 +739,8 @@ export class MatterSimulationEngine {
     }
   }
 
-  private syncRopesForBody(bodyId: string, visible: boolean): void {
-    for (const rope of this.ropes.values()) {
-      if (rope.bodyA !== bodyId && rope.bodyB !== bodyId) continue;
-      const a = this.bodies.get(rope.bodyA);
-      const b = this.bodies.get(rope.bodyB);
-      const bothVisible = a?.visible && b?.visible;
-      if (!bothVisible) {
-        for (const c of rope.constraints) Matter.World.remove(this.world, c);
-        for (const segId of rope.segmentIds) {
-          const s = this.bodies.get(segId);
-          if (s?.visible) Matter.World.remove(this.world, s.body);
-        }
-      } else if (visible && rope.visible) {
-        for (const c of rope.constraints) Matter.World.add(this.world, c);
-        for (const segId of rope.segmentIds) {
-          const s = this.bodies.get(segId);
-          if (s?.visible) Matter.World.add(this.world, s.body);
-        }
-      }
-    }
+  private syncRopesForBody(_bodyId: string, _visible: boolean): void {
+    /* Verlet ropes have no Matter bodies — visibility is logical only. */
   }
 
   removeBody(id: string): void {
@@ -697,13 +770,29 @@ export class MatterSimulationEngine {
     }
   }
 
-  setBodyPosition(id: string, x: number, y: number): void {
+  setBodyPosition(
+    id: string,
+    x: number,
+    y: number,
+    opts?: { zeroVelocity?: boolean },
+  ): void {
     const entry = this.bodies.get(id);
     if (!entry || !entry.visible) return;
     if (entry.body.isStatic && entry.entityKind !== "collisionBounds") return;
     Matter.Body.setPosition(entry.body, { x, y });
-    Matter.Body.setVelocity(entry.body, { x: 0, y: 0 });
-    Matter.Body.setAngularVelocity(entry.body, 0);
+    if (opts?.zeroVelocity) {
+      Matter.Body.setVelocity(entry.body, { x: 0, y: 0 });
+      Matter.Body.setAngularVelocity(entry.body, 0);
+    }
+    Matter.Sleeping.set(entry.body, false);
+  }
+
+  setBodyMotion(id: string, vx: number, vy: number, av: number): void {
+    const entry = this.bodies.get(id);
+    if (!entry || !entry.visible) return;
+    if (entry.body.isStatic && entry.entityKind !== "collisionBounds") return;
+    Matter.Body.setVelocity(entry.body, { x: vx, y: vy });
+    Matter.Body.setAngularVelocity(entry.body, av);
     Matter.Sleeping.set(entry.body, false);
   }
 
@@ -750,8 +839,12 @@ export class MatterSimulationEngine {
     this.dragPosition = { x, y };
     this.dragSleepThreshold = entry.body.sleepThreshold;
     entry.body.sleepThreshold = Infinity;
+    this.dragSavedMotion = {
+      vx: entry.body.velocity.x,
+      vy: entry.body.velocity.y,
+      av: entry.body.angularVelocity,
+    };
     Matter.Sleeping.set(entry.body, false);
-    this.applyDragPin();
   }
 
   dragTo(id: string, pointerX: number, pointerY: number): void {
@@ -766,12 +859,23 @@ export class MatterSimulationEngine {
   endDrag(): void {
     if (this.dragBodyId) {
       const entry = this.bodies.get(this.dragBodyId);
-      if (entry && this.dragSleepThreshold !== null) {
-        entry.body.sleepThreshold = this.dragSleepThreshold;
+      if (entry) {
+        if (this.dragSleepThreshold !== null) {
+          entry.body.sleepThreshold = this.dragSleepThreshold;
+        }
+        if (this.dragSavedMotion) {
+          Matter.Body.setVelocity(entry.body, {
+            x: this.dragSavedMotion.vx,
+            y: this.dragSavedMotion.vy,
+          });
+          Matter.Body.setAngularVelocity(entry.body, this.dragSavedMotion.av);
+          Matter.Sleeping.set(entry.body, false);
+        }
       }
     }
     this.dragBodyId = null;
     this.dragSleepThreshold = null;
+    this.dragSavedMotion = null;
   }
 
   isDragging(id?: string): boolean {
@@ -789,6 +893,20 @@ export class MatterSimulationEngine {
     Matter.Body.setVelocity(entry.body, { x: 0, y: 0 });
     Matter.Body.setAngularVelocity(entry.body, 0);
     Matter.Sleeping.set(entry.body, false);
+  }
+
+  updateRopeProps(
+    id: string,
+    props: { linkStiffness?: number; linkDamping?: number },
+  ): void {
+    const rope = this.ropes.get(id);
+    if (!rope || !rope.visible) return;
+    if (props.linkStiffness !== undefined) rope.linkStiffness = props.linkStiffness;
+    if (props.linkDamping !== undefined) rope.linkDamping = props.linkDamping;
+    const a = this.bodies.get(rope.bodyA);
+    const b = this.bodies.get(rope.bodyB);
+    if (a?.visible) Matter.Sleeping.set(a.body, false);
+    if (b?.visible) Matter.Sleeping.set(b.body, false);
   }
 
   updateSpringProps(
@@ -910,7 +1028,22 @@ export class MatterSimulationEngine {
   }
 
   step(dtMs: number, timeScale = 1): void {
-    Matter.Engine.update(this.engine, dtMs * timeScale);
+    const scaledDt = dtMs * timeScale;
+    const hasRopes = this.ropes.size > 0;
+
+    this.engine.constraintIterations = SPRING_CONSTRAINT_ITERATIONS;
+    this.engine.positionIterations = 8;
+    this.engine.velocityIterations = 6;
+
+    const stepMs = scaledDt;
+    const dtSec = stepMs / 1000;
+
+    this.clearBodyForces();
+    if (hasRopes) {
+      this.simulateVerletRopes(dtSec);
+    }
+    Matter.Engine.update(this.engine, stepMs);
+
     if (this.dragBodyId) this.applyDragPin();
     this.collectCollisions();
     this.tick += 1;
@@ -946,10 +1079,76 @@ export class MatterSimulationEngine {
     }
   }
 
+  private ropeAnchorWorld(rope: InternalRope): {
+    surfA: { x: number; y: number };
+    surfB: { x: number; y: number };
+  } {
+    const entA = this.bodies.get(rope.bodyA);
+    const entB = this.bodies.get(rope.bodyB);
+    const surfA = entA
+      ? this.localPointToWorld(entA.body, rope.anchorA.x, rope.anchorA.y)
+      : { x: 0, y: 0 };
+    const surfB = entB
+      ? this.localPointToWorld(entB.body, rope.anchorB.x, rope.anchorB.y)
+      : { x: 0, y: 0 };
+    return { surfA, surfB };
+  }
+
+  /** Straight chord between anchors — used when history has no rope particle state. */
+  resetAllVerletRopes(): void {
+    for (const rope of this.ropes.values()) {
+      if (!rope.visible) continue;
+      const { surfA, surfB } = this.ropeAnchorWorld(rope);
+      reinitializeVerletRope(rope.verlet, surfA, surfB);
+    }
+    this.clearBodyForces();
+  }
+
+  /** Re-chord ropes tied to a body (after setup drag / inspector move). */
+  reinitializeRopesAttachedTo(bodyId: string): void {
+    for (const rope of this.ropes.values()) {
+      if (!rope.visible) continue;
+      if (rope.bodyA !== bodyId && rope.bodyB !== bodyId) continue;
+      const { surfA, surfB } = this.ropeAnchorWorld(rope);
+      reinitializeVerletRope(rope.verlet, surfA, surfB);
+    }
+  }
+
+  /** Restore Verlet particles from a snapshot (timeline keyframes). */
+  restoreRopeParticles(ropes: RopeSnapshot[]): void {
+    const restored = new Set<string>();
+    for (const rs of ropes) {
+      const internal = this.ropes.get(rs.id);
+      if (!internal?.visible) continue;
+      const pts = rs.particles;
+      const live = internal.verlet.particles;
+      if (pts && pts.length === live.length) {
+        for (let i = 0; i < live.length; i++) {
+          const p = live[i]!;
+          const s = pts[i]!;
+          p.x = s.x;
+          p.y = s.y;
+          p.px = s.x;
+          p.py = s.y;
+          p.pinned = i === 0 || i === live.length - 1;
+        }
+        restored.add(rs.id);
+      }
+    }
+    for (const rope of this.ropes.values()) {
+      if (!restored.has(rope.id)) {
+        const { surfA, surfB } = this.ropeAnchorWorld(rope);
+        reinitializeVerletRope(rope.verlet, surfA, surfB);
+      }
+    }
+  }
+
   reset(width: number, height: number): void {
     Matter.World.clear(this.world, false);
     this.bodies.clear();
     this.springs.clear();
+    this.ropes.clear();
+    this.invalidateColliderCache();
     this.bounds = [];
     this.tick = 0;
     resetNameCounters();
@@ -963,7 +1162,11 @@ export class MatterSimulationEngine {
 
   private bodyToSnapshot(entry: InternalBody): SimBodySnapshot {
     const b = entry.body;
-    const plugin = b.plugin as { fluxGravityScale?: number } | undefined;
+    const plugin = b.plugin as {
+      fluxGravityScale?: number;
+      fluxRopeId?: string;
+      fluxSegIndex?: number;
+    } | undefined;
     return {
       id: entry.id,
       displayName: entry.displayName,
@@ -989,6 +1192,8 @@ export class MatterSimulationEngine {
       isSleeping: b.isSleeping,
       width: entry.width,
       height: entry.height,
+      ropeId: plugin?.fluxRopeId,
+      ropeSegIndex: plugin?.fluxSegIndex,
     };
   }
 
@@ -1035,8 +1240,24 @@ export class MatterSimulationEngine {
       damping: s.constraint.damping ?? 0,
       length: s.constraint.length ?? 0,
       visible: s.visible,
+      anchorA: { ...s.anchorA },
+      anchorB: { ...s.anchorB },
     }));
-    return { bodies, springs, tick: this.tick };
+    const ropes: RopeSnapshot[] = [...this.ropes.values()].map((r) => ({
+      id: r.id,
+      displayName: r.displayName,
+      bodyA: r.bodyA,
+      bodyB: r.bodyB,
+      anchorA: { ...r.anchorA },
+      anchorB: { ...r.anchorB },
+      segmentCount: r.segmentCount,
+      linkStiffness: r.linkStiffness,
+      linkDamping: r.linkDamping,
+      visible: r.visible,
+      particles: r.verlet.particles.map((p) => ({ x: p.x, y: p.y })),
+      segmentLength: r.verlet.segmentLength,
+    }));
+    return { bodies, springs, ropes, tick: this.tick };
   }
 
   /** Demo bodies near world center (above the floor). */
@@ -1047,6 +1268,25 @@ export class MatterSimulationEngine {
     this.spawnCircle(cx, cy - 900, 22);
     this.spawnRectangle(cx - 80, cy - 400, 40, 40);
     this.spawnRectangle(cx + 80, cy - 400, 56, 32);
+  }
+
+  /**
+   * Restore setup / frame-0 content from a snapshot: removes current ropes, springs, and
+   * dynamic bodies, then re-imports. Walls and floor are preserved.
+   */
+  replaceAuthoringContent(snap: SimulationSnapshot): void {
+    for (const id of [...this.ropes.keys()]) this.removeRope(id);
+    for (const id of [...this.springs.keys()]) this.removeSpring(id);
+
+    for (const [id, ent] of [...this.bodies.entries()]) {
+      if (ent.entityKind === "wall" || ent.entityKind === "floor") continue;
+      this.removeBody(id);
+    }
+
+    this.invalidateColliderCache();
+    this.importScenario(snap);
+    this.clearBodyForces();
+    this.resetAllVerletRopes();
   }
 
   /** Load a authored scenario after {@link reset} (skips walls/floor — bounds come from reset). */
@@ -1088,8 +1328,26 @@ export class MatterSimulationEngine {
         damping: s.damping,
         length: s.length > 0 ? s.length : undefined,
         id: s.id,
+        pointA: s.anchorA ?? { x: 0, y: 0 },
+        pointB: s.anchorB ?? { x: 0, y: 0 },
       });
       if (s.visible === false) this.setSpringVisible(s.id, false);
+    }
+
+    const ropes = snap.ropes ?? [];
+    for (const r of ropes) {
+      if (!r.id || !r.bodyA || !r.bodyB) continue;
+      if (!this.bodies.has(r.bodyA) || !this.bodies.has(r.bodyB)) continue;
+      this.connectRope(r.bodyA, r.bodyB, {
+        id: r.id,
+        displayName: r.displayName,
+        segmentCount: r.segmentCount,
+        linkStiffness: r.linkStiffness,
+        linkDamping: r.linkDamping,
+        pointA: r.anchorA,
+        pointB: r.anchorB,
+      });
+      if (r.visible === false) this.setRopeVisible(r.id, false);
     }
   }
 
@@ -1106,6 +1364,7 @@ export class MatterSimulationEngine {
     for (const b of this.bounds) ids.push(b.id);
     for (const b of this.bodies.values()) ids.push(b.id);
     for (const s of this.springs.values()) ids.push(s.id);
+    for (const r of this.ropes.values()) ids.push(r.id);
     return ids;
   }
 }

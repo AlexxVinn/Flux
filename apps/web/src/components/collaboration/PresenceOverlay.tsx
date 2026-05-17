@@ -1,5 +1,6 @@
 "use client";
 
+import { UserAvatar } from "@/components/collaboration/UserAvatar";
 import { worldToScreen } from "@/lib/physics/worldSpace";
 import { useCollaborationStore } from "@/store/collaborationStore";
 import { useSimulationStore } from "@/store/simulationStore";
@@ -7,9 +8,11 @@ import { useSimulationStore } from "@/store/simulationStore";
 export function PresenceOverlay({ width, height }: { width: number; height: number }) {
   const peers = useCollaborationStore((s) => s.peers);
   const connected = useCollaborationStore((s) => s.connected);
+  const supabaseConnected = useCollaborationStore((s) => s.supabaseConnected);
   const camera = useSimulationStore((s) => s.camera);
 
-  if (!connected || peers.length === 0) return null;
+  const showCursors = connected || supabaseConnected;
+  if (!showCursors || peers.length === 0) return null;
 
   return (
     <svg
@@ -29,20 +32,23 @@ export function PresenceOverlay({ width, height }: { width: number; height: numb
               stroke="#0a0a0a"
               strokeWidth={0.5}
             />
+            <foreignObject x={12} y={-6} width={20} height={20}>
+              <UserAvatar
+                userId={peer.userId}
+                color={peer.color}
+                size={18}
+                displayName={peer.displayName}
+              />
+            </foreignObject>
             <text
-              x={12}
+              x={34}
               y={4}
               fill={peer.color}
               fontSize={10}
-              fontFamily="monospace"
+              fontFamily="ui-sans-serif, system-ui, sans-serif"
             >
               {peer.displayName}
             </text>
-            {peer.selectedIds && peer.selectedIds.length > 0 && (
-              <text x={12} y={14} fill="rgba(255,255,255,0.5)" fontSize={8}>
-                {peer.selectedIds.length} selected
-              </text>
-            )}
           </g>
         );
       })}

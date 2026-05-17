@@ -3,9 +3,6 @@ import { userId as toUserId } from "@flux/shared";
 import { getSupabase, isSupabaseConfigured } from "./client";
 import type { Database } from "./database.types";
 
-const ROOM_SLUG =
-  process.env.NEXT_PUBLIC_FLUX_ROOM_SLUG ?? "mechanics-default";
-
 let cachedRoomId: string | null = null;
 
 /** Postgres `uuid` columns require RFC-4122 ids (not `log_abc` style strings). */
@@ -31,16 +28,7 @@ export async function resolveRoomId(): Promise<string | null> {
 
   if (cachedRoomId) return cachedRoomId;
 
-  const supabase = getSupabase();
-  const { data, error } = await supabase
-    .from("rooms")
-    .select("id")
-    .eq("slug", ROOM_SLUG)
-    .maybeSingle();
-
-  if (error || !data) return null;
-  cachedRoomId = data.id;
-  return data.id;
+  return null;
 }
 
 export async function fetchChatMessages(roomId: string): Promise<ChatMessage[]> {
@@ -187,7 +175,24 @@ export async function insertActionLog(
   }
 }
 
-export function subscribeRoomRealtime(
+/** Channel name passed to `supabase.channel()` (topic becomes `realtime:${name}`). */
+export function roomRealtimeChannelName(roomId: string): string {
+  return `room:${roomId}`;
+}
+
+function isRoomRealtimeChannel(topic: string, roomId: string): boolean {
+  const name = roomRealtimeChannelName(roomId);
+  return topic === `realtime:${name}` || topic === name;
+}
+
+/** Drop any existing room collab channel so a new one can register `.on()` before `subscribe()`. */
+export async function removeRoomRealtimeChannel(roomId: string): Promise<void> {
+  const supabase = getSupabase();
+  const stale = supabase.getChannels().filter((ch) => isRoomRealtimeChannel(ch.topic, roomId));
+  await Promise.all(stale.map((ch) => supabase.removeChannel(ch)));
+}
+
+export async function subscribeRoomRealtime(
   roomId: string,
   handlers: {
     onMessage?: (row: ChatMessage) => void;
@@ -203,11 +208,15 @@ export function subscribeRoomRealtime(
       new: Record<string, unknown>;
       old?: Record<string, unknown>;
     }) => void;
+    /** Invoked for every Realtime channel status transition (subscribe callback). */
+    onChannelStatus?: (status: string, err?: Error) => void;
   },
-): () => void {
+): Promise<() => void> {
   const supabase = getSupabase();
+  await removeRoomRealtimeChannel(roomId);
+
   const channel = supabase
-    .channel(`room:${roomId}`)
+    .channel(roomRealtimeChannelName(roomId))
     .on(
       "postgres_changes",
       { event: "INSERT", schema: "public", table: "room_messages", filter: `room_id=eq.${roomId}` },
@@ -309,10 +318,33 @@ export function subscribeRoomRealtime(
       (payload: { new: Record<string, unknown>; old?: Record<string, unknown> }) => {
         handlers.onRoomRowUpdate?.(payload);
       },
-    )
-    .subscribe();
+    );
 
-  return () => {
-    void supabase.removeChannel(channel);
-  };
+  return new Promise((resolve) => {
+    let settled = false;
+    const teardown = () => {
+      void removeRoomRealtimeChannel(roomId);
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve(teardown);
+    };
+
+    channel.subscribe((status, err) => {
+      handlers.onChannelStatus?.(status, err);
+      if (status === "SUBSCRIBED") {
+        finish();
+        return;
+      }
+      if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+        if (process.env.NODE_ENV === "development") {
+          console.warn("[flux] room realtime subscription:", status, err?.message ?? err);
+        }
+        finish();
+      }
+    });
+
+    window.setTimeout(finish, 8_000);
+  });
 }

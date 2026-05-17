@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { isSupabaseConfigured } from "@/lib/supabase/client";
 import { buildWorkspacePath, type TestLayoutId } from "@/lib/physics/testLayouts";
@@ -11,6 +11,7 @@ import { useCollaborationStore } from "@/store/collaborationStore";
 import { useRoomSceneCollaborationStore } from "@/store/roomSceneCollaborationStore";
 import { useSimulationStore, isAtSharedSetupFrame } from "@/store/simulationStore";
 import { ResizeHandle } from "./layout/ResizeHandle";
+import { leaveRoomSession } from "@/lib/rooms/roomSessionRuntime";
 
 const MODULES = [
   {
@@ -40,10 +41,11 @@ interface WorkspaceSidebarProps {
 
 export function WorkspaceSidebar({ roomId, benchId }: WorkspaceSidebarProps) {
   const pathname = usePathname();
+  const router = useRouter();
   const membership = useRoomSessionStore((s) => s.membership);
   const sidebarWidth = useWorkspaceLayoutStore((s) => s.sidebarWidth);
   const sidebarCollapsed = useWorkspaceLayoutStore((s) => s.sidebarCollapsed);
-  const setSidebarWidth = useWorkspaceLayoutStore((s) => s.setSidebarWidth);
+  const adjustSidebarWidth = useWorkspaceLayoutStore((s) => s.adjustSidebarWidth);
   const toggleSidebarCollapsed = useWorkspaceLayoutStore((s) => s.toggleSidebarCollapsed);
 
   const supabaseConnected = useCollaborationStore((s) => s.supabaseConnected);
@@ -115,7 +117,6 @@ export function WorkspaceSidebar({ roomId, benchId }: WorkspaceSidebarProps) {
   }, [toggleSidebarCollapsed]);
 
   return (
-    <>
       <aside
         style={{ width: sidebarWidth }}
         className="relative flex shrink-0 flex-col border-r border-[var(--flux-border)] bg-black"
@@ -165,8 +166,8 @@ export function WorkspaceSidebar({ roomId, benchId }: WorkspaceSidebarProps) {
                 </div>
               </div>
               <p className="mt-2 px-0.5 text-[10px] leading-snug text-white/35">
-                Invites and membership stay in the top bar; here you switch labs, share the workspace URL,
-                and confirm cloud sync status.
+                Open the <span className="text-white/55">Members</span> panel on the right for the roster,
+                invite code, and moderation. Here you switch labs and confirm cloud sync.
               </p>
             </div>
 
@@ -311,10 +312,13 @@ export function WorkspaceSidebar({ roomId, benchId }: WorkspaceSidebarProps) {
         </nav>
 
         <div className="border-t border-[var(--flux-border)] p-2">
-          <Link
-            href="/"
+          <button
+            type="button"
             title="All rooms"
-            className={`flex items-center gap-2 rounded-md px-2 py-2 text-[11px] text-white/45 transition hover:bg-white/[0.04] hover:text-white/80 ${
+            onClick={() => {
+              void leaveRoomSession().then(() => router.push("/"));
+            }}
+            className={`flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-[11px] text-white/45 transition hover:bg-white/[0.04] hover:text-white/80 ${
               sidebarCollapsed ? "justify-center" : ""
             }`}
           >
@@ -322,22 +326,22 @@ export function WorkspaceSidebar({ roomId, benchId }: WorkspaceSidebarProps) {
               ←
             </span>
             {!sidebarCollapsed && <span>All rooms</span>}
-          </Link>
+          </button>
           {!sidebarCollapsed && (
             <p className="mt-1 px-2 text-[9px] leading-snug text-white/25">
               Press <kbd className="font-mono text-white/35">[</kbd> to toggle this panel
             </p>
           )}
         </div>
+        {!sidebarCollapsed && (
+          <ResizeHandle
+            overlay
+            axis="column"
+            edge="end"
+            className="absolute inset-y-0 right-0 z-50 w-3 translate-x-1/2"
+            onDrag={adjustSidebarWidth}
+          />
+        )}
       </aside>
-
-      {!sidebarCollapsed && (
-        <ResizeHandle
-          axis="column"
-          edge="end"
-          onDrag={(dx) => setSidebarWidth(sidebarWidth + dx)}
-        />
-      )}
-    </>
   );
 }

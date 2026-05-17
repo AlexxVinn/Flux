@@ -1,68 +1,80 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { WorkspaceShell } from "@/components/workspace/WorkspaceShell";
 import { RoomHeader } from "@/components/room/RoomHeader";
-import { useRoomSessionHydrated, useRoomSessionStore } from "@/store/roomSessionStore";
-import { joinRoomByCode } from "@/lib/rooms/api";
+import { useRoomSessionStore } from "@/store/roomSessionStore";
+import { membershipMatchesRoute, resolveWorkspaceMembership } from "@/lib/rooms/session";
+import {
+  activateRoomSession,
+  isSessionCurrent,
+  syncRoomSession,
+} from "@/lib/rooms/roomSessionRuntime";
 import {
   buildWorkspacePath,
-  PENDING_JOIN_ANONYMOUS_KEY,
-  PENDING_JOIN_CODE_KEY,
   readBenchFromSearch,
 } from "@/lib/physics/testLayouts";
+import { useAuthStore } from "@/store/authStore";
 
-function WorkspaceRoomContent() {
+function WorkspaceRoomContent({ routeKey }: { routeKey: string }) {
   const params = useParams<{ module: string; roomSlug: string }>();
   const router = useRouter();
   const searchParams = useSearchParams();
   const benchId = readBenchFromSearch(searchParams.toString());
-  const hydrated = useRoomSessionHydrated();
   const membership = useRoomSessionStore((s) => s.membership);
-  const setMembership = useRoomSessionStore((s) => s.setMembership);
+  const user = useAuthStore((s) => s.user);
   const [ready, setReady] = useState(false);
   const [enterError, setEnterError] = useState<string | null>(null);
+  const runIdRef = useRef(0);
+
+  const mod = params.module;
+  const slug = params.roomSlug;
+  const sessionReady = ready && membershipMatchesRoute(membership, mod, slug);
 
   useEffect(() => {
-    if (!hydrated) return;
-
-    const slug = params.roomSlug;
-    const mod = params.module;
-
-    if (membership && membership.slug === slug && membership.module === mod) {
-      sessionStorage.removeItem(PENDING_JOIN_CODE_KEY);
-      sessionStorage.removeItem(PENDING_JOIN_ANONYMOUS_KEY);
-      setReady(true);
-      setEnterError(null);
-      return;
-    }
-
-    const code = sessionStorage.getItem(PENDING_JOIN_CODE_KEY);
-    if (code) {
-      const anonymous = sessionStorage.getItem(PENDING_JOIN_ANONYMOUS_KEY) === "1";
-      sessionStorage.removeItem(PENDING_JOIN_CODE_KEY);
-      sessionStorage.removeItem(PENDING_JOIN_ANONYMOUS_KEY);
-
-      void joinRoomByCode(code, { anonymous })
-        .then((m) => {
-          setMembership(m);
-          if (m.slug !== slug || m.module !== mod) {
-            router.replace(buildWorkspacePath(m.module, m.slug, benchId));
-            return;
-          }
-          setReady(true);
-          setEnterError(null);
-        })
-        .catch(() => {
-          setEnterError("Could not enter the simulation room.");
-        });
-      return;
-    }
-
+    setReady(false);
     setEnterError(null);
-    router.replace("/");
-  }, [hydrated, membership, params.module, params.roomSlug, router, setMembership, benchId]);
+    const runId = ++runIdRef.current;
+
+    void (async () => {
+      try {
+        const resolved = await resolveWorkspaceMembership(mod, slug, { anonymous: !user });
+        if (runId !== runIdRef.current) return;
+
+        if (resolved.slug !== slug || resolved.module !== mod) {
+          router.replace(buildWorkspacePath(resolved.module, resolved.slug, benchId));
+          return;
+        }
+
+        const generation = await activateRoomSession(resolved, { anonymous: !user });
+        if (runId !== runIdRef.current || !isSessionCurrent(generation, resolved.roomId)) {
+          return;
+        }
+
+        const synced = await syncRoomSession(resolved.roomId, generation);
+        if (runId !== runIdRef.current || !isSessionCurrent(generation, resolved.roomId)) {
+          return;
+        }
+
+        if (!synced) {
+          console.warn("[flux] room scene refresh returned empty; continuing with local bench seed");
+        }
+
+        setReady(true);
+        setEnterError(null);
+      } catch (e) {
+        if (runId !== runIdRef.current) return;
+        setEnterError(
+          e instanceof Error ? e.message : "Could not enter the simulation room.",
+        );
+      }
+    })();
+
+    return () => {
+      runIdRef.current += 1;
+    };
+  }, [routeKey, mod, slug, router, benchId, user]);
 
   if (enterError) {
     return (
@@ -79,7 +91,7 @@ function WorkspaceRoomContent() {
     );
   }
 
-  if (!ready || !membership) {
+  if (!sessionReady || !membership) {
     return (
       <div className="flex h-screen items-center justify-center text-sm text-flux-muted">
         Entering room…
@@ -97,6 +109,19 @@ function WorkspaceRoomContent() {
   );
 }
 
+function WorkspaceRoomGate() {
+  const params = useParams<{ module: string; roomSlug: string }>();
+  const searchParams = useSearchParams();
+  const benchId = readBenchFromSearch(searchParams.toString());
+
+  const routeKey = useMemo(
+    () => `${params.module}:${params.roomSlug}:${benchId ?? ""}`,
+    [params.module, params.roomSlug, benchId],
+  );
+
+  return <WorkspaceRoomContent key={routeKey} routeKey={routeKey} />;
+}
+
 export default function WorkspaceRoomPage() {
   return (
     <Suspense
@@ -106,7 +131,7 @@ export default function WorkspaceRoomPage() {
         </div>
       }
     >
-      <WorkspaceRoomContent />
+      <WorkspaceRoomGate />
     </Suspense>
   );
 }

@@ -45,7 +45,8 @@ export async function fetchCatalogScenes(): Promise<CatalogScene[]> {
     .eq("is_published", true)
     .order("sort_order", { ascending: true });
 
-  if (error || !data) return [];
+  if (error) throw new Error(error.message);
+  if (!data) return [];
 
   return data.map((row) => ({
     id: row.id,
@@ -180,7 +181,8 @@ export async function fetchPublicRooms(): Promise<
     .order("created_at", { ascending: false })
     .limit(20);
 
-  if (error || !data) return [];
+  if (error) throw new Error(error.message);
+  if (!data) return [];
 
   return data.map((r) => ({
     id: r.id,
@@ -195,7 +197,7 @@ export async function fetchRoomMembers(roomId: string) {
   const supabase = getSupabase();
   const { data, error } = await supabase
     .from("room_members")
-    .select("id, user_id, guest_id, role, display_name, joined_at")
+    .select("id, room_id, user_id, guest_id, role, display_name, joined_at")
     .eq("room_id", roomId)
     .is("kicked_at", null)
     .order("joined_at", { ascending: true });

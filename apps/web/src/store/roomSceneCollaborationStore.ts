@@ -1,6 +1,7 @@
 "use client";
 
 import { create } from "zustand";
+import type { RoomMembership } from "@flux/shared";
 import {
   normalizeStoredScene,
   type StoredSceneSnapshot,
@@ -8,19 +9,28 @@ import {
   type SceneOp,
 } from "@/lib/scene/storedScene";
 import { rpcApplySceneOp, rpcGetRoomScene, rpcSetPlaybackState } from "@/lib/scene/roomSceneApi";
+import { markLocalSceneRevisionApplied, resetRemoteSceneSyncState } from "@/lib/collaboration/remoteSceneSync";
 import { createDbId } from "@/lib/supabase/roomRepository";
+import { DEFAULT_SCENE_OBJECT_LIMIT } from "@/lib/scene/sceneLimits";
 
 interface RoomSceneCollaborationState {
   roomId: string | null;
+  /** `${roomId}:${memberId}:${collabBindingEpoch}` — when it changes, seq state must reset. */
+  collabBindKey: string | null;
   sceneRevision: number;
   playbackRevision: number;
   playbackState: "paused" | "playing";
   objectLimit: number;
+  /** Highest scene-op seq this client has committed (local acks). */
   lastAckSeq: number;
+  /** Highest remote scene-op seq processed via Realtime (separate from local acks). */
+  lastProcessedRemoteSeq: number;
   lastServerSnapshot: StoredSceneSnapshot | null;
 
   ingestJoinPayload: (raw: unknown) => void;
   setRoomContext: (roomId: string | null) => void;
+  /** Idempotent: full reset when membership session or epoch changes (re-entry, same room). */
+  rebindToMembershipIfStale: (membership: RoomMembership, collabBindingEpoch: number) => void;
   markPlaybackFromRpc: (
     state: "paused" | "playing",
     playbackRevision: number,
@@ -29,6 +39,7 @@ interface RoomSceneCollaborationState {
   ) => void;
   afterLocalApplyAck: (sceneRevision: number, seq: number, snapshotRaw: unknown) => void;
   shouldApplyRemoteSeq: (seq: number) => boolean;
+  markRemoteSeqProcessed: (seq: number) => void;
   commitSceneOp: (
     baseRevision: number,
     op: SceneOp,
@@ -48,22 +59,56 @@ interface RoomSceneCollaborationState {
 
 export const useRoomSceneCollaborationStore = create<RoomSceneCollaborationState>((set, get) => ({
   roomId: null,
+  collabBindKey: null,
   sceneRevision: 0,
   playbackRevision: 0,
   playbackState: "paused",
-  objectLimit: 64,
+  objectLimit: DEFAULT_SCENE_OBJECT_LIMIT,
   lastAckSeq: 0,
+  lastProcessedRemoteSeq: 0,
   lastServerSnapshot: null,
 
   setRoomContext: (roomId) => {
+    if (roomId === null) {
+      set({
+        roomId: null,
+        collabBindKey: null,
+        sceneRevision: 0,
+        playbackRevision: 0,
+        playbackState: "paused",
+        lastAckSeq: 0,
+        lastProcessedRemoteSeq: 0,
+        lastServerSnapshot: null,
+      });
+      return;
+    }
     if (roomId === get().roomId) return;
     set({
       roomId,
+      collabBindKey: null,
       sceneRevision: 0,
       playbackRevision: 0,
       playbackState: "paused",
       lastAckSeq: 0,
+      lastProcessedRemoteSeq: 0,
       lastServerSnapshot: null,
+    });
+  },
+
+  rebindToMembershipIfStale: (membership, collabBindingEpoch) => {
+    const key = `${membership.roomId}:${membership.memberId}:${collabBindingEpoch}`;
+    if (key === get().collabBindKey) return;
+    resetRemoteSceneSyncState();
+    set({
+      collabBindKey: key,
+      roomId: membership.roomId,
+      sceneRevision: 0,
+      playbackRevision: 0,
+      playbackState: "paused",
+      lastAckSeq: 0,
+      lastProcessedRemoteSeq: 0,
+      lastServerSnapshot: null,
+      objectLimit: DEFAULT_SCENE_OBJECT_LIMIT,
     });
   },
 
@@ -83,9 +128,11 @@ export const useRoomSceneCollaborationStore = create<RoomSceneCollaborationState
       sceneRevision,
       playbackRevision: typeof d.playback_revision === "number" ? d.playback_revision : 0,
       playbackState: d.playback_state === "playing" ? "playing" : "paused",
-      objectLimit: typeof d.object_limit === "number" ? d.object_limit : 64,
+      objectLimit:
+        typeof d.object_limit === "number" ? d.object_limit : DEFAULT_SCENE_OBJECT_LIMIT,
       lastServerSnapshot: snap,
       lastAckSeq: 0,
+      lastProcessedRemoteSeq: 0,
     });
   },
 
@@ -100,14 +147,21 @@ export const useRoomSceneCollaborationStore = create<RoomSceneCollaborationState
   },
 
   afterLocalApplyAck: (sceneRevision, seq, snapshotRaw) => {
+    const roomId = get().roomId;
     set({
       sceneRevision,
       lastAckSeq: Math.max(get().lastAckSeq, seq),
+      lastProcessedRemoteSeq: Math.max(get().lastProcessedRemoteSeq, seq),
       lastServerSnapshot: normalizeStoredScene(snapshotRaw),
     });
+    if (roomId) markLocalSceneRevisionApplied(sceneRevision, roomId);
   },
 
-  shouldApplyRemoteSeq: (seq) => seq > get().lastAckSeq,
+  shouldApplyRemoteSeq: (seq) => seq > get().lastProcessedRemoteSeq,
+
+  markRemoteSeqProcessed: (seq) => {
+    set({ lastProcessedRemoteSeq: Math.max(get().lastProcessedRemoteSeq, seq) });
+  },
 
   commitSceneOp: async (baseRevision, op) => {
     const { roomId } = get();

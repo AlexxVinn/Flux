@@ -9,6 +9,7 @@ interface WorkspaceLayoutState {
   timelineHeight: number;
 
   setSidebarWidth: (width: number) => void;
+  adjustSidebarWidth: (delta: number) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   toggleSidebarCollapsed: () => void;
   setTimelineHeight: (height: number) => void;
@@ -16,7 +17,9 @@ interface WorkspaceLayoutState {
 }
 
 export const SIDEBAR_WIDTH_MIN = 52;
-export const SIDEBAR_WIDTH_MAX = 280;
+/** Minimum width when the sidebar is expanded (drag resize). */
+export const SIDEBAR_WIDTH_EXPANDED_MIN = 160;
+export const SIDEBAR_WIDTH_MAX = 320;
 export const SIDEBAR_WIDTH_DEFAULT = 220;
 export const SIDEBAR_WIDTH_COLLAPSED = 56;
 
@@ -27,7 +30,7 @@ export const TIMELINE_HEIGHT_DEFAULT = 120;
 function clampSidebar(w: number, collapsed: boolean): number {
   if (collapsed) return SIDEBAR_WIDTH_COLLAPSED;
   return Math.round(
-    Math.max(SIDEBAR_WIDTH_MIN + 120, Math.min(SIDEBAR_WIDTH_MAX, w)),
+    Math.max(SIDEBAR_WIDTH_EXPANDED_MIN, Math.min(SIDEBAR_WIDTH_MAX, w)),
   );
 }
 
@@ -45,6 +48,12 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutState>()(
       setSidebarWidth: (width) => {
         const { sidebarCollapsed } = get();
         set({ sidebarWidth: clampSidebar(width, sidebarCollapsed) });
+      },
+
+      adjustSidebarWidth: (delta) => {
+        const { sidebarWidth, sidebarCollapsed } = get();
+        if (sidebarCollapsed || delta === 0) return;
+        set({ sidebarWidth: clampSidebar(sidebarWidth + delta, false) });
       },
 
       setSidebarCollapsed: (sidebarCollapsed) =>

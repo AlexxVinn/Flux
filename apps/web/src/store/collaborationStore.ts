@@ -22,8 +22,15 @@ import {
   initSupabaseCollaboration,
   teardownSupabaseCollaboration,
 } from "@/lib/supabase/initRoom";
+import { resolveAvatarColor } from "@/lib/collaboration/avatar";
+import {
+  subscribeRoomPresence,
+  type RoomPresencePayload,
+} from "@/lib/supabase/roomPresence";
 import { useAuthStore } from "@/store/authStore";
 import { useRoomSessionStore } from "@/store/roomSessionStore";
+import { isSessionCurrent } from "@/lib/rooms/roomSessionRuntime";
+import { useMultiplayerConnectionStore } from "@/lib/multiplayer/connectionStore";
 import type { MemberRole } from "@flux/shared";
 
 /** Set NEXT_PUBLIC_FLUX_WS_URL to enable live cursors (e.g. ws://localhost:3001). Omit to skip. */
@@ -79,6 +86,7 @@ interface CollaborationState {
   draftAnnotation: Vec2[];
 
   connect: () => void;
+  connectToRoom: (roomId: string, sessionGeneration: number) => Promise<void>;
   disconnect: () => void;
   sendPresence: (patch: Partial<UserPresence>) => void;
   sendCursor: (cursor: Vec2) => void;
@@ -94,8 +102,93 @@ interface CollaborationState {
 
 let socket: WebSocket | null = null;
 let wsAttempted = false;
+let wsHeartbeatId: number | null = null;
+let wsReconnectTimeout: number | null = null;
+let wsReconnectGeneration = 0;
+
+function clearWsHeartbeat(): void {
+  if (wsHeartbeatId !== null) {
+    clearInterval(wsHeartbeatId);
+    wsHeartbeatId = null;
+  }
+}
+
+function clearWsReconnectTimer(): void {
+  if (wsReconnectTimeout !== null) {
+    clearTimeout(wsReconnectTimeout);
+    wsReconnectTimeout = null;
+  }
+}
 
 let roomDbId: string | null = null;
+let roomPresenceUnsub: (() => void) | null = null;
+let roomPresenceUpdate: ((payload: RoomPresencePayload) => void) | null = null;
+let wsPeers: UserPresence[] = [];
+let supabasePeers: UserPresence[] = [];
+let presencePatch: Partial<UserPresence> = {};
+
+function stopRoomPresence(): void {
+  roomPresenceUnsub?.();
+  roomPresenceUnsub = null;
+  roomPresenceUpdate = null;
+  supabasePeers = [];
+}
+
+function mergeAndSetPeers(
+  set: (p: Partial<CollaborationState>) => void,
+  selfUserId: string,
+): void {
+  const byId = new Map<string, UserPresence>();
+  for (const p of [...wsPeers, ...supabasePeers]) {
+    const existing = byId.get(p.userId);
+    if (!existing) {
+      byId.set(p.userId, p);
+      continue;
+    }
+    byId.set(p.userId, {
+      ...existing,
+      ...p,
+      displayName: p.displayName || existing.displayName,
+      color: p.color || existing.color,
+      cursor: p.cursor ?? existing.cursor,
+      selectedIds: p.selectedIds ?? existing.selectedIds,
+    });
+  }
+  const peers = [...byId.values()].filter((u) => u.userId !== selfUserId);
+  set({ peers });
+}
+
+function startRoomPresence(
+  roomId: string,
+  set: (p: Partial<CollaborationState>) => void,
+  get: () => CollaborationState,
+): void {
+  stopRoomPresence();
+  const presenceKey = get().userId;
+  const { update, unsubscribe } = subscribeRoomPresence(
+    roomId,
+    presenceKey,
+    (peers) => {
+      supabasePeers = peers;
+      mergeAndSetPeers(set, get().userId);
+    },
+  );
+  roomPresenceUpdate = update;
+  roomPresenceUnsub = unsubscribe;
+  pushPresenceToSupabase(get);
+}
+
+function pushPresenceToSupabase(get: () => CollaborationState): void {
+  if (!roomPresenceUpdate) return;
+  const { displayName, color } = get();
+  const payload: RoomPresencePayload = {
+    displayName,
+    color,
+    selectedIds: presencePatch.selectedIds,
+    cursor: presencePatch.cursor,
+  };
+  roomPresenceUpdate(payload);
+}
 
 function syncCollaborationIdentity(
   set: (p: Partial<CollaborationState>) => void,
@@ -106,7 +199,8 @@ function syncCollaborationIdentity(
   const userId = profile?.id ?? get().userId ?? getOrCreateUserId();
   const displayName =
     membership?.displayName ?? profile?.displayName ?? getDisplayName();
-  set({ userId, displayName });
+  const color = resolveAvatarColor(userId, profile?.avatarColor);
+  set({ userId, displayName, color });
 }
 
 function currentMemberRole(): MemberRole | null {
@@ -133,43 +227,89 @@ export const useCollaborationStore = create<CollaborationState>((set, get) => ({
   draftAnnotation: [],
 
   connect: () => {
+    const targetRoomId = useRoomSessionStore.getState().membership?.roomId;
+    if (!targetRoomId) return;
+    void get().connectToRoom(targetRoomId, 0);
+  },
+
+  connectToRoom: async (targetRoomId, sessionGeneration) => {
     if (typeof window === "undefined") return;
 
     syncCollaborationIdentity(set, get);
 
-    if (isSupabaseConfigured() && !get().supabaseConnected) {
-      void initSupabaseCollaboration({
-        setMessages: (messages) => set({ messages }),
-        appendMessage: (m) =>
-          set((s) => ({
-            messages: s.messages.some((x) => x.id === m.id) ? s.messages : [...s.messages, m],
-          })),
-        setAnnotations: (annotations) => set({ annotations }),
-        appendAnnotation: (a) =>
-          set((s) => ({
-            annotations: s.annotations.some((x) => x.id === a.id)
-              ? s.annotations
-              : [...s.annotations, a],
-          })),
-        setActionLog: (actionLog) => set({ actionLog }),
-        appendAction: (e) =>
-          set((s) => ({
-            actionLog: s.actionLog.some((x) => x.id === e.id)
-              ? s.actionLog
-              : [...s.actionLog.slice(-199), e],
-          })),
-      }).then((id) => {
-        if (id) {
-          roomDbId = id;
-          set({ supabaseConnected: true, roomDbId: id });
-        }
-      });
+    if (useRoomSessionStore.getState().membership?.roomId !== targetRoomId) return;
+
+    const connectedRoomId = get().roomDbId;
+    if (get().supabaseConnected && connectedRoomId !== targetRoomId) {
+      get().disconnect();
+      syncCollaborationIdentity(set, get);
+      await new Promise<void>((r) => window.setTimeout(r, 80));
+    }
+
+    if (useRoomSessionStore.getState().membership?.roomId !== targetRoomId) return;
+
+    if (get().supabaseConnected && connectedRoomId === targetRoomId) {
+      if (sessionGeneration > 0) {
+        teardownSupabaseCollaboration();
+        stopRoomPresence();
+        roomDbId = null;
+        set({ supabaseConnected: false, roomDbId: null });
+        await new Promise<void>((r) => window.setTimeout(r, 120));
+      } else {
+        get().sendPresence({});
+        return;
+      }
+    }
+
+    if (useRoomSessionStore.getState().membership?.roomId !== targetRoomId) return;
+
+    if (isSupabaseConfigured()) {
+      const id = await initSupabaseCollaboration(
+        {
+          setMessages: (messages) => set({ messages }),
+          appendMessage: (m) =>
+            set((s) => ({
+              messages: s.messages.some((x) => x.id === m.id) ? s.messages : [...s.messages, m],
+            })),
+          setAnnotations: (annotations) => set({ annotations }),
+          appendAnnotation: (a) =>
+            set((s) => ({
+              annotations: s.annotations.some((x) => x.id === a.id)
+                ? s.annotations
+                : [...s.annotations, a],
+            })),
+          setActionLog: (actionLog) => set({ actionLog }),
+          appendAction: (e) =>
+            set((s) => ({
+              actionLog: s.actionLog.some((x) => x.id === e.id)
+                ? s.actionLog
+                : [...s.actionLog.slice(-199), e],
+            })),
+        },
+        targetRoomId,
+      );
+
+      const sessionOk =
+        sessionGeneration > 0
+          ? isSessionCurrent(sessionGeneration, targetRoomId)
+          : useRoomSessionStore.getState().membership?.roomId === targetRoomId;
+
+      if (id && sessionOk) {
+        roomDbId = id;
+        syncCollaborationIdentity(set, get);
+        set({ supabaseConnected: true, roomDbId: id });
+        startRoomPresence(id, set, get);
+        get().sendPresence({});
+      }
     }
 
     if (!isWebSocketEnabled()) return;
     if (socket?.readyState === WebSocket.OPEN) return;
     if (wsAttempted && socket?.readyState === WebSocket.CONNECTING) return;
-    if (wsAttempted && socket === null) return;
+
+    clearWsHeartbeat();
+    clearWsReconnectTimer();
+    useMultiplayerConnectionStore.getState().setWsPhase("connecting");
 
     wsAttempted = true;
     const ws = new WebSocket(WS_URL);
@@ -180,6 +320,8 @@ export const useCollaborationStore = create<CollaborationState>((set, get) => ({
     };
 
     ws.onopen = () => {
+      useMultiplayerConnectionStore.getState().setWsPhase("connected");
+      useMultiplayerConnectionStore.getState().setWsReconnectAttempt(0);
       const { userId, displayName } = get();
       const join: ExtendedClientMessage = {
         type: "join",
@@ -190,11 +332,23 @@ export const useCollaborationStore = create<CollaborationState>((set, get) => ({
       ws.send(JSON.stringify(join));
       set({ connected: true });
       get().sendPresence({});
+
+      clearWsHeartbeat();
+      wsHeartbeatId = window.setInterval(() => {
+        if (socket?.readyState === WebSocket.OPEN) {
+          useMultiplayerConnectionStore.getState().noteWsPing();
+          socket.send(JSON.stringify({ type: "ping", ts: Date.now() } satisfies ExtendedClientMessage));
+        }
+      }, 25_000);
     };
 
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(String(ev.data)) as ExtendedServerMessage;
+        if (msg.type === "pong") {
+          useMultiplayerConnectionStore.getState().noteWsPong(msg.ts);
+          return;
+        }
         handleServerMessage(msg, set, get);
       } catch {
         /* ignore */
@@ -202,29 +356,62 @@ export const useCollaborationStore = create<CollaborationState>((set, get) => ({
     };
 
     ws.onclose = () => {
+      clearWsHeartbeat();
       set({ connected: false });
       socket = null;
+      wsAttempted = false;
+      useMultiplayerConnectionStore.getState().setWsPhase("disconnected");
+
+      const rid = get().roomDbId;
+      if (!isWebSocketEnabled() || !rid) return;
+
+      wsReconnectGeneration += 1;
+      const gen = wsReconnectGeneration;
+      const st = useMultiplayerConnectionStore.getState();
+      const attempt = st.wsReconnectAttempt;
+      const delay = Math.min(30_000, 1000 * Math.pow(2, attempt));
+      st.setWsReconnectAttempt(Math.min(attempt + 1, 12));
+      st.setWsPhase("reconnecting");
+
+      clearWsReconnectTimer();
+      wsReconnectTimeout = window.setTimeout(() => {
+        wsReconnectTimeout = null;
+        if (gen !== wsReconnectGeneration) return;
+        if (get().roomDbId !== rid) return;
+        if (!isWebSocketEnabled()) return;
+        void get().connectToRoom(rid, 0);
+      }, delay);
     };
   },
 
   disconnect: () => {
+    wsReconnectGeneration += 1;
+    clearWsHeartbeat();
+    clearWsReconnectTimer();
     socket?.close();
     socket = null;
     wsAttempted = false;
+    useMultiplayerConnectionStore.getState().setWsPhase("disconnected");
+    useMultiplayerConnectionStore.getState().setWsReconnectAttempt(0);
+    stopRoomPresence();
+    wsPeers = [];
+    presencePatch = {};
     teardownSupabaseCollaboration();
     roomDbId = null;
-    set({ connected: false, supabaseConnected: false, roomDbId: null });
+    set({ connected: false, supabaseConnected: false, roomDbId: null, peers: [] });
   },
 
   sendPresence: (patch) => {
+    presencePatch = { ...presencePatch, ...patch };
     const { userId, displayName, color } = get();
     const presence: UserPresence = {
       userId: toUserId(userId),
       displayName,
       color,
-      ...patch,
+      ...presencePatch,
     };
     send({ type: "presence", roomId: ROOM_ID, presence });
+    pushPresenceToSupabase(get);
   },
 
   sendCursor: (cursor) => {
@@ -333,12 +520,10 @@ function handleServerMessage(
   switch (msg.type) {
     case "presenceSync": {
       const self = get().userId;
-      const peers = msg.users.filter((u: UserPresence) => u.userId !== self);
+      wsPeers = msg.users.filter((u: UserPresence) => u.userId !== self);
       const me = msg.users.find((u: UserPresence) => u.userId === self);
-      set({
-        peers,
-        ...(me?.color ? { color: me.color } : {}),
-      });
+      mergeAndSetPeers(set, self);
+      if (me?.color) set({ color: me.color });
       break;
     }
     case "annotationSync":

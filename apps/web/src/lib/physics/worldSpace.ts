@@ -4,8 +4,8 @@ import { COLLISION_FRAME_WALL_THICKNESS } from "./physicsConstants";
 /** Fixed authoring space: physics + persisted scene coords live in this rectangle (pixels / world units). */
 
 export const FLUX_WORLD = {
-  WIDTH: 10_000,
-  HEIGHT: 10_000,
+  WIDTH: 3000,
+  HEIGHT: 2000,
 } as const;
 
 export const FLUX_WORLD_CENTER = {

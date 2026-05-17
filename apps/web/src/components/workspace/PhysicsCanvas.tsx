@@ -3,12 +3,20 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import { useSimulationStore } from "@/store/simulationStore";
 import { useCollaborationStore } from "@/store/collaborationStore";
+import { buildPeerMarksByEntity } from "@/lib/collaboration/peerSelection";
 import { renderSimulation } from "@/lib/physics/canvasRenderer";
 import { screenToWorld } from "@/lib/physics/worldSpace";
+import { worldRectFromPoints, isDraggableBody } from "@/lib/physics/selectionUtils";
+import { isAtSharedSetupFrame } from "@/store/simulationStore";
 import { PresenceOverlay } from "@/components/collaboration/PresenceOverlay";
 import { AnnotationLayer } from "@/components/collaboration/AnnotationLayer";
 import { useRoomSessionStore, useCanWriteInRoom } from "@/store/roomSessionStore";
 import { useRoomSceneCollaborationStore } from "@/store/roomSceneCollaborationStore";
+import {
+  applyCollaborativeSceneFromStore,
+  markLocalSceneRevisionApplied,
+  pullAndApplyRemoteScene,
+} from "@/lib/collaboration/remoteSceneSync";
 import { rpcGetRoomScene } from "@/lib/scene/roomSceneApi";
 
 interface PhysicsCanvasProps {
@@ -30,6 +38,7 @@ export function PhysicsCanvas({ benchId = null }: PhysicsCanvasProps) {
   const selectedIds = useSimulationStore((s) => s.selectedIds);
   const activeTool = useSimulationStore((s) => s.activeTool);
   const selectEntity = useSimulationStore((s) => s.selectEntity);
+  const selectInMarquee = useSimulationStore((s) => s.selectInMarquee);
   const clearSelection = useSimulationStore((s) => s.clearSelection);
   const spawnAt = useSimulationStore((s) => s.spawnAt);
   const pickAt = useSimulationStore((s) => s.pickAt);
@@ -56,6 +65,14 @@ export function PhysicsCanvas({ benchId = null }: PhysicsCanvasProps) {
   const lastCursorSendRef = useRef(0);
   const isPanningRef = useRef(false);
   const panLastClientRef = useRef<{ x: number; y: number } | null>(null);
+  const marqueeRef = useRef<{
+    startWorld: { x: number; y: number };
+    currentWorld: { x: number; y: number };
+    startScreen: { x: number; y: number };
+    mode: "replace" | "add";
+  } | null>(null);
+
+  const MARQUEE_THRESHOLD_PX = 4;
 
   const measure = useCallback(() => {
     const el = containerRef.current;
@@ -64,17 +81,29 @@ export function PhysicsCanvas({ benchId = null }: PhysicsCanvasProps) {
     return { width: Math.floor(width), height: Math.floor(height) };
   }, []);
 
+  const membership = useRoomSessionStore((s) => s.membership);
+  const supabaseConnected = useCollaborationStore((s) => s.supabaseConnected);
+  const collabRoomId = useRoomSceneCollaborationStore((s) => s.roomId);
+  const sceneRevision = useRoomSceneCollaborationStore((s) => s.sceneRevision);
+
   useEffect(() => {
+    if (!membership?.roomId) return;
     connect();
     return () => disconnect();
-  }, [connect, disconnect]);
+  }, [membership?.roomId, connect, disconnect]);
+
+  /** Apply remote scene revisions to Matter as soon as the collab store advances. */
+  useEffect(() => {
+    if (!collabRoomId || collabRoomId !== membership?.roomId) return;
+    if (!supabaseConnected) return;
+    if (!useSimulationStore.getState().engine) return;
+    const applied = applyCollaborativeSceneFromStore(false, false);
+    if (!applied) void pullAndApplyRemoteScene({ refitCamera: false });
+  }, [sceneRevision, collabRoomId, membership?.roomId, supabaseConnected]);
 
   useEffect(() => {
     sendSelection(selectedIds);
   }, [selectedIds, sendSelection]);
-
-  const membership = useRoomSessionStore((s) => s.membership);
-  const supabaseConnected = useCollaborationStore((s) => s.supabaseConnected);
   const seedLayoutKeyRef = useRef<{ roomId: string | undefined; benchKey: string | null } | null>(
     null,
   );
@@ -99,8 +128,11 @@ export function PhysicsCanvas({ benchId = null }: PhysicsCanvasProps) {
       const m = membership;
       const expectedRoomId = m?.roomId ?? null;
 
-      if (expectedRoomId) {
-        useRoomSceneCollaborationStore.getState().setRoomContext(expectedRoomId);
+      if (expectedRoomId && m) {
+        useRoomSceneCollaborationStore.getState().rebindToMembershipIfStale(
+          m,
+          useRoomSessionStore.getState().collabBindingEpoch,
+        );
       }
 
       if (expectedRoomId && supabaseConnected) {
@@ -114,7 +146,10 @@ export function PhysicsCanvas({ benchId = null }: PhysicsCanvasProps) {
       const snap = collab.lastServerSnapshot;
       const hasServerContent =
         !!snap &&
-        (snap.bodies.length > 0 || snap.springs.length > 0 || collab.sceneRevision > 0);
+        (snap.bodies.length > 0 ||
+          snap.springs.length > 0 ||
+          (snap.ropes?.length ?? 0) > 0 ||
+          collab.sceneRevision > 0);
 
       if (
         expectedRoomId &&
@@ -124,6 +159,7 @@ export function PhysicsCanvas({ benchId = null }: PhysicsCanvasProps) {
         snap
       ) {
         hydrateFromStoredScene(w, h, snap, false);
+        markLocalSceneRevisionApplied(collab.sceneRevision, expectedRoomId);
       } else {
         initEngine(w, h, benchId);
         if (expectedRoomId && supabaseConnected) {
@@ -159,7 +195,6 @@ export function PhysicsCanvas({ benchId = null }: PhysicsCanvasProps) {
       cancelled = true;
       ro.disconnect();
       useSimulationStore.getState().tearDownForRoomChange();
-      useRoomSceneCollaborationStore.getState().setRoomContext(null);
     };
   }, [
     benchId,
@@ -170,78 +205,6 @@ export function PhysicsCanvas({ benchId = null }: PhysicsCanvasProps) {
     resize,
     setPlaying,
     supabaseConnected,
-  ]);
-
-  const supabaseEverPrev = useRef<boolean | null>(null);
-  const sceneRoomIdPrev = useRef<string | null>(null);
-
-  /**
-   * When Supabase connects after the first paint we may have seeded a local bench already.
-   * When the room id changes while connected, load that room's scene into the existing engine.
-   */
-  useEffect(() => {
-    const roomId = membership?.roomId;
-    if (!roomId || !supabaseConnected) {
-      if (!roomId) sceneRoomIdPrev.current = null;
-      if (supabaseEverPrev.current !== null) supabaseEverPrev.current = supabaseConnected;
-      return;
-    }
-
-    if (supabaseEverPrev.current === null) {
-      supabaseEverPrev.current = supabaseConnected;
-      sceneRoomIdPrev.current = roomId;
-      return;
-    }
-
-    const supabaseBecameTrue = supabaseConnected && supabaseEverPrev.current === false;
-    const roomChanged = roomId !== sceneRoomIdPrev.current;
-    supabaseEverPrev.current = supabaseConnected;
-    sceneRoomIdPrev.current = roomId;
-
-    if (!supabaseBecameTrue && !roomChanged) return;
-
-    let cancelled = false;
-
-    void (async () => {
-      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-      if (cancelled) return;
-
-      useRoomSceneCollaborationStore.getState().setRoomContext(roomId);
-      const raw = await rpcGetRoomScene(roomId);
-      if (cancelled || !raw) return;
-      if (useRoomSessionStore.getState().membership?.roomId !== roomId) return;
-      useRoomSceneCollaborationStore.getState().ingestJoinPayload(raw);
-
-      const collab = useRoomSceneCollaborationStore.getState();
-      const snap = collab.lastServerSnapshot;
-      const hasServerContent =
-        !!snap &&
-        (snap.bodies.length > 0 || snap.springs.length > 0 || collab.sceneRevision > 0);
-
-      if (!hasServerContent || !snap) {
-        if (useSimulationStore.getState().engine) {
-          setPlaying(false);
-        }
-        return;
-      }
-
-      if (!useSimulationStore.getState().engine) return;
-
-      const { width, height } = measure();
-      if (width < 8 || height < 8) return;
-      hydrateFromStoredScene(width, height, snap, false);
-      setSize({ width, height });
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    membership?.roomId,
-    supabaseConnected,
-    hydrateFromStoredScene,
-    measure,
-    setPlaying,
   ]);
 
   useEffect(() => {
@@ -269,6 +232,42 @@ export function PhysicsCanvas({ benchId = null }: PhysicsCanvasProps) {
       }
 
       const sim = useSimulationStore.getState();
+      const collab = useCollaborationStore.getState();
+      const peerMarksByEntity = buildPeerMarksByEntity(
+        collab.peers,
+        sim.snapshot,
+        collab.userId,
+      );
+      const marquee = marqueeRef.current;
+      const selectionMarquee = marquee
+        ? worldRectFromPoints(
+            marquee.startWorld.x,
+            marquee.startWorld.y,
+            marquee.currentWorld.x,
+            marquee.currentWorld.y,
+          )
+        : null;
+
+      const previewEnd = sim.springPreviewEnd;
+      const linkPlacementPreview = (() => {
+        if (!previewEnd) return null;
+        if (sim.springPending) {
+          return {
+            from: { x: sim.springPending.worldX, y: sim.springPending.worldY },
+            to: previewEnd,
+            kind: "spring" as const,
+          };
+        }
+        if (sim.ropePending) {
+          return {
+            from: { x: sim.ropePending.worldX, y: sim.ropePending.worldY },
+            to: previewEnd,
+            kind: "rope" as const,
+          };
+        }
+        return null;
+      })();
+
       renderSimulation(ctx, sim.snapshot, {
         width,
         height,
@@ -278,6 +277,9 @@ export function PhysicsCanvas({ benchId = null }: PhysicsCanvasProps) {
         debug: sim.debug,
         gravityForBody: sim.getGravityForce,
         collisions: sim.getCollisions(),
+        selectionMarquee,
+        peerMarksByEntity,
+        linkPlacementPreview,
       });
 
       rafRef.current = requestAnimationFrame(loop);
@@ -365,18 +367,45 @@ export function PhysicsCanvas({ benchId = null }: PhysicsCanvasProps) {
     }
 
     if (activeTool !== "select") {
-      if (canWrite) spawnAt(pt.x, pt.y);
+      if (canWrite) {
+        spawnAt(pt.x, pt.y, { ctrlKey: e.ctrlKey, shiftKey: e.shiftKey });
+      }
       return;
     }
 
+    const sim = useSimulationStore.getState();
+    const canEdit =
+      canWrite &&
+      (!membership?.roomId ||
+        isAtSharedSetupFrame({
+          historyIndex: sim.historyIndex,
+          historyLength: sim.historyLength,
+        }));
+
+    const subtract = e.ctrlKey;
+    const additive = (e.shiftKey || e.metaKey) && !subtract;
     const hit = pickAt(pt.x, pt.y);
+
     if (!hit) {
-      clearSelection();
+      marqueeRef.current = {
+        startWorld: pt,
+        currentWorld: pt,
+        startScreen: cp.screen,
+        mode: additive ? "add" : "replace",
+      };
       return;
     }
-    selectEntity(hit, { additive: e.metaKey || e.ctrlKey, range: e.shiftKey });
-    const body = useSimulationStore.getState().snapshot.bodies.find((b) => b.id === hit);
-    if (body && body.visible && (!body.isStatic || body.entityKind === "collisionBounds")) {
+
+    if (subtract) {
+      selectEntity(hit, { subtract: true });
+    } else if (additive) {
+      selectEntity(hit, { additive: true });
+    } else if (!sim.selectedIds.includes(hit)) {
+      selectEntity(hit);
+    }
+
+    const body = sim.snapshot.bodies.find((b) => b.id === hit);
+    if (canEdit && body && isDraggableBody(body)) {
       dragTargetRef.current = hit;
       beginDrag(hit, pt.x, pt.y);
     }
@@ -407,11 +436,25 @@ export function PhysicsCanvas({ benchId = null }: PhysicsCanvasProps) {
       return;
     }
 
+    const marquee = marqueeRef.current;
+    if (marquee) {
+      marquee.currentWorld = pt;
+      return;
+    }
+
     const id = dragTargetRef.current;
     if (id) {
       dragTo(id, pt.x, pt.y);
       return;
     }
+
+    const simState = useSimulationStore.getState();
+    if (simState.activeTool === "spring" && simState.springPending) {
+      simState.updateSpringPreviewFromPointer(pt.x, pt.y, e.ctrlKey, e.shiftKey);
+    } else if (simState.activeTool === "rope" && simState.ropePending) {
+      simState.updateRopePreviewFromPointer(pt.x, pt.y, e.ctrlKey, e.shiftKey);
+    }
+
     if (activeTool !== "select") return;
     const hit = pickAt(pt.x, pt.y);
     useSimulationStore.getState().setHovered(hit);
@@ -422,6 +465,30 @@ export function PhysicsCanvas({ benchId = null }: PhysicsCanvasProps) {
       isPanningRef.current = false;
       panLastClientRef.current = null;
     }
+
+    const marquee = marqueeRef.current;
+    if (marquee) {
+      const cp = canvasPointer(e);
+      if (cp) {
+        const end = pointerToWorld(cp.screen, cp.vw, cp.vh);
+        const dx = cp.screen.x - marquee.startScreen.x;
+        const dy = cp.screen.y - marquee.startScreen.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist >= MARQUEE_THRESHOLD_PX) {
+          const rect = worldRectFromPoints(
+            marquee.startWorld.x,
+            marquee.startWorld.y,
+            end.x,
+            end.y,
+          );
+          selectInMarquee(rect, marquee.mode);
+        } else if (marquee.mode === "replace") {
+          clearSelection();
+        }
+      }
+      marqueeRef.current = null;
+    }
+
     dragTargetRef.current = null;
     endDrag();
     try {
@@ -441,7 +508,9 @@ export function PhysicsCanvas({ benchId = null }: PhysicsCanvasProps) {
     <div ref={containerRef} className="relative min-h-0 flex-1 bg-black">
       <canvas
         ref={canvasRef}
-        className="absolute inset-0 h-full w-full cursor-crosshair"
+        className={`absolute inset-0 h-full w-full ${
+          activeTool === "select" ? "cursor-default" : "cursor-crosshair"
+        }`}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}

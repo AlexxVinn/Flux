@@ -7,4 +7,5 @@ export * from "./actions.js";
 export * from "./protocol.js";
 export * from "./collaboration.js";
 export * from "./collaborationProtocol.js";
+export * from "./networkEvents.js";
 export * from "./rooms.js";

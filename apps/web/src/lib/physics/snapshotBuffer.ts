@@ -81,6 +81,36 @@ export class SnapshotBuffer {
     this.lastCompact = [];
   }
 
+  /**
+   * Replace frame 0 with the current authoring scene (after setup edits).
+   * Optionally drops playback frames so frame 0 stays the single source of truth.
+   */
+  updateSetupKeyframe(
+    snap: SimulationSnapshot,
+    opts?: { truncatePlayback?: boolean },
+  ): void {
+    const compact = compactFromSnapshot(snap);
+    const setupSnap: SimulationSnapshot = { ...snap, tick: 0 };
+    const frame: HistoryFrame = {
+      tick: 0,
+      elapsedMs: 0,
+      isKeyframe: true,
+      bodies: compact,
+      full: setupSnap,
+    };
+
+    if (this.frames.length === 0) {
+      this.frames.push(frame);
+    } else {
+      this.frames[0] = frame;
+      if (opts?.truncatePlayback && this.frames.length > 1) {
+        this.frames.length = 1;
+      }
+    }
+
+    this.lastCompact = compact;
+  }
+
   push(snap: SimulationSnapshot, elapsedMs: number): void {
     const compact = compactFromSnapshot(snap);
     const isKeyframe =

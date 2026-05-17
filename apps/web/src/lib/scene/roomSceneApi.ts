@@ -66,6 +66,14 @@ export async function rpcApplySceneOp(
     if (msg.includes("not_paused")) return { ok: false, code: "not_paused", message: msg };
     if (msg.includes("object_limit")) return { ok: false, code: "object_limit", message: msg };
     if (msg.includes("entity_not_found")) return { ok: false, code: "entity_not_found", message: msg };
+    if (msg.includes("unknown_op_type")) {
+      return {
+        ok: false,
+        code: "unknown_op_type",
+        message:
+          "Server does not support this edit yet (rope ops). Apply the latest Supabase migration (scene_ropes).",
+      };
+    }
     return { ok: false, code: error.code ?? "rpc_error", message: msg };
   }
 

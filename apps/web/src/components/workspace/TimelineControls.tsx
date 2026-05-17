@@ -83,8 +83,9 @@ export function TimelineControls() {
         const sim = useSimulationStore.getState();
         if (ok && snap && sim.engine) {
           sim.reconcilePausedEngineWithServerSnapshot(snap, { refitCamera: true });
+        } else {
+          useSimulationStore.getState().scrubTo(0);
         }
-        useSimulationStore.getState().scrubTo(0);
       })();
       return;
     }

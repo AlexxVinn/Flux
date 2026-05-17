@@ -9,11 +9,12 @@ import { useRoomSceneCollaborationStore } from "@/store/roomSceneCollaborationSt
 import { countSceneObjects } from "@/lib/scene/storedScene";
 
 const TOOLS: { id: SpawnTool; label: string; hint: string }[] = [
-  { id: "select", label: "Select", hint: "V" },
-  { id: "circle", label: "Circle", hint: "O" },
-  { id: "rectangle", label: "Box", hint: "B" },
-  { id: "collisionBox", label: "Bounds", hint: "C" },
-  { id: "spring", label: "Spring", hint: "S" },
+  { id: "select", label: "Select", hint: "1" },
+  { id: "circle", label: "Circle", hint: "2" },
+  { id: "rectangle", label: "Box", hint: "3" },
+  { id: "spring", label: "Spring", hint: "4" },
+  { id: "rope", label: "Rope", hint: "5" },
+  { id: "collisionBox", label: "Bounds", hint: "6" },
 ];
 
 interface ObjectToolbarProps {
@@ -27,6 +28,7 @@ export function ObjectToolbar({ timelineOffset = 120 }: ObjectToolbarProps) {
   const objectLimit = useRoomSceneCollaborationStore((s) => s.objectLimit);
   const activeTool = useSimulationStore((s) => s.activeTool);
   const springPending = useSimulationStore((s) => s.springPending);
+  const ropePending = useSimulationStore((s) => s.ropePending);
   const snapshot = useSimulationStore((s) => s.snapshot);
   const setTool = useSimulationStore((s) => s.setTool);
   const deleteSelected = useSimulationStore((s) => s.deleteSelected);
@@ -48,7 +50,7 @@ export function ObjectToolbar({ timelineOffset = 120 }: ObjectToolbarProps) {
     >
       {TOOLS.map((t) => {
         const spawns =
-          t.id === "circle" || t.id === "rectangle" || t.id === "spring";
+          t.id === "circle" || t.id === "rectangle" || t.id === "spring" || t.id === "rope";
         const disabled = spawns && atObjectCap;
         return (
           <button
@@ -76,12 +78,20 @@ export function ObjectToolbar({ timelineOffset = 120 }: ObjectToolbarProps) {
       <button
         type="button"
         onClick={deleteSelected}
+        title="Delete selection (Del)"
         className="rounded px-2 py-1.5 text-xs text-flux-muted hover:bg-flux-danger/20 hover:text-flux-danger"
       >
         Delete
       </button>
       {springPending && (
-        <span className="ml-2 text-[10px] text-flux-text">Pick 2nd body for spring</span>
+        <span className="ml-2 text-[10px] text-flux-text">
+          Pick 2nd body · Shift = angle snap · Ctrl = free attach · Esc cancel
+        </span>
+      )}
+      {ropePending && (
+        <span className="ml-2 text-[10px] text-flux-text">
+          Pick 2nd body · Shift = angle snap · Ctrl = free attach · Esc cancel
+        </span>
       )}
     </div>
   );

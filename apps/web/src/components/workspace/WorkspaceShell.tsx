@@ -7,6 +7,7 @@ import { ObjectToolbar } from "@/components/workspace/ObjectToolbar";
 import { WorkspaceRightPanel } from "@/components/workspace/WorkspaceRightPanel";
 import { ResizeHandle } from "@/components/workspace/layout/ResizeHandle";
 import { useWorkspaceLayoutStore } from "@/store/workspaceLayoutStore";
+import { useWorkspaceHotkeys } from "@/hooks/useWorkspaceHotkeys";
 
 interface WorkspaceShellProps {
   roomId: string;
@@ -14,6 +15,7 @@ interface WorkspaceShellProps {
 }
 
 export function WorkspaceShell({ roomId, benchId }: WorkspaceShellProps) {
+  useWorkspaceHotkeys();
   const timelineHeight = useWorkspaceLayoutStore((s) => s.timelineHeight);
   const adjustTimelineHeight = useWorkspaceLayoutStore((s) => s.adjustTimelineHeight);
 
@@ -31,9 +33,10 @@ export function WorkspaceShell({ roomId, benchId }: WorkspaceShellProps) {
             style={{ height: timelineHeight }}
           >
             <ResizeHandle
+              overlay
               axis="row"
               edge="start"
-              className="absolute inset-x-0 top-0 z-30 -translate-y-1/2"
+              className="absolute inset-x-0 top-0 z-30 h-3 -translate-y-1/2"
               onDrag={adjustTimelineHeight}
             />
             <TimelineControls />

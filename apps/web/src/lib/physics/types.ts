@@ -40,8 +40,10 @@ export interface SimBodySnapshot {
   isSleeping: boolean;
   width: number;
   height: number;
-  /** Set on `ropeSegment` bodies — parent {@link RopeSnapshot.id}. */
+  /** @deprecated Legacy Matter beads; Verlet ropes do not create bodies. */
   ropeId?: string;
+  /** @deprecated */
+  ropeSegIndex?: number;
 }
 
 export interface SpringSnapshot {
@@ -54,18 +56,39 @@ export interface SpringSnapshot {
   /** Rest length in px (Matter constraint length). */
   length: number;
   visible: boolean;
+  /** Local-space anchor on bodyA (default center). */
+  anchorA?: { x: number; y: number };
+  /** Local-space anchor on bodyB (default center). */
+  anchorB?: { x: number; y: number };
 }
 
-/** Logical rope: chain of dynamic links between two bodies (segments are engine-only beads). */
+/** First endpoint chosen while placing a spring or rope. */
+export interface SpringPendingAnchor {
+  bodyId: string;
+  localX: number;
+  localY: number;
+  worldX: number;
+  worldY: number;
+}
+
+export type RopePendingAnchor = SpringPendingAnchor;
+
+/** Logical rope: Verlet particle chain between two anchor bodies. */
 export interface RopeSnapshot {
   id: string;
   displayName: string;
   bodyA: string;
   bodyB: string;
+  /** Interior particles (excluding both anchor endpoints). */
   segmentCount: number;
   linkStiffness: number;
   linkDamping: number;
   visible: boolean;
+  anchorA?: { x: number; y: number };
+  anchorB?: { x: number; y: number };
+  /** World-space simulated points (endpoints + interior), updated each tick. */
+  particles?: { x: number; y: number }[];
+  segmentLength?: number;
 }
 
 export interface SimulationSnapshot {

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Instrument_Sans, IBM_Plex_Mono } from "next/font/google";
 import { AuthProvider } from "@/components/auth/AuthProvider";
+import { RoomSessionBinder } from "@/components/session/RoomSessionBinder";
 import "./globals.css";
 
 const sans = Instrument_Sans({
@@ -25,7 +26,10 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${sans.variable} ${mono.variable} h-full`}>
       <body className="h-full overflow-hidden bg-flux-bg text-flux-text antialiased">
-        <AuthProvider>{children}</AuthProvider>
+        <AuthProvider>
+          <RoomSessionBinder />
+          {children}
+        </AuthProvider>
       </body>
     </html>
   );

@@ -6,6 +6,7 @@ import type { LayerEntity } from "@/lib/physics/types";
 
 function entityIcon(entity: LayerEntity): string {
   if (entity.type === "spring") return "⌇";
+  if (entity.type === "rope") return "⎯";
   const k = entity.data.entityKind;
   if (k === "circle") return "○";
   if (k === "wall") return "▢";
@@ -19,11 +20,11 @@ function entityId(entity: LayerEntity): string {
 }
 
 function entityName(entity: LayerEntity): string {
-  return entity.type === "body" ? entity.data.displayName : entity.data.displayName;
+  return entity.data.displayName;
 }
 
 function entityVisible(entity: LayerEntity): boolean {
-  return entity.type === "body" ? entity.data.visible : entity.data.visible;
+  return entity.data.visible;
 }
 
 function LayerRow({
@@ -166,8 +167,8 @@ export function LayersPanel({ bare = false }: { bare?: boolean }) {
                 hovered={hoveredId === id}
                 onSelect={(e) => {
                   selectEntity(id, {
-                    additive: e.metaKey || e.ctrlKey,
-                    range: e.shiftKey,
+                    additive: (e.shiftKey || e.metaKey) && !e.ctrlKey,
+                    subtract: e.ctrlKey,
                   });
                 }}
                 onHover={(enter) => setHovered(enter ? id : null)}

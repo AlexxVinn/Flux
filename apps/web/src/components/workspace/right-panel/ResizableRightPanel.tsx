@@ -3,6 +3,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import { useSimulationStore } from "@/store/simulationStore";
 import { useCollaborationStore } from "@/store/collaborationStore";
+import { useRoomMemberCounts } from "@/hooks/useRoomMembers";
 import {
   useRightPanelStore,
   REGION_ORDER,
@@ -14,6 +15,7 @@ import { PropertyInspector } from "@/components/inspector/PropertyInspector";
 import { DebugOverlaysPanel } from "@/components/inspector/DebugOverlaysPanel";
 import { ActionHistoryPanel } from "@/components/collaboration/ActionHistoryPanel";
 import { DiscussionPanel } from "@/components/collaboration/DiscussionPanel";
+import { MembersPanel } from "@/components/collaboration/MembersPanel";
 import { ResizeHandle } from "@/components/workspace/layout/ResizeHandle";
 import { PanelRegion } from "./PanelRegion";
 import { PanelSplitter } from "./PanelSplitter";
@@ -26,6 +28,7 @@ const REGION_META: Record<
 > = {
   scene: { title: "Scene", icon: "▣" },
   properties: { title: "Properties", icon: "◇", accent: true },
+  members: { title: "Members", icon: "◎" },
   activity: { title: "Activity", icon: "◷" },
   discussion: { title: "Chat", icon: "◉" },
 };
@@ -57,6 +60,7 @@ function RegionBody({ id }: { id: RightPanelRegionId }) {
     );
   }
   if (id === "properties") return <PropertyInspector />;
+  if (id === "members") return <MembersPanel bare />;
   if (id === "activity") return <ActionHistoryPanel bare />;
   return <DiscussionPanel bare />;
 }
@@ -66,7 +70,7 @@ export function ResizableRightPanel() {
   const layoutMode = useRightPanelStore((s) => s.layoutMode);
   const focusedRegion = useRightPanelStore((s) => s.focusedRegion);
   const regions = useRightPanelStore((s) => s.regions);
-  const setWidth = useRightPanelStore((s) => s.setWidth);
+  const adjustWidth = useRightPanelStore((s) => s.adjustWidth);
   const setLayoutMode = useRightPanelStore((s) => s.setLayoutMode);
   const focusRegion = useRightPanelStore((s) => s.focusRegion);
   const toggleRegion = useRightPanelStore((s) => s.toggleRegion);
@@ -80,6 +84,7 @@ export function ResizableRightPanel() {
   const connected =
     useCollaborationStore((s) => s.connected) ||
     useCollaborationStore((s) => s.supabaseConnected);
+  const { totalCount: memberCount } = useRoomMemberCounts();
 
   useEffect(() => {
     const el = stackRef.current;
@@ -97,6 +102,7 @@ export function ResizableRightPanel() {
 
   const badgeFor = (id: RightPanelRegionId) => {
     if (id === "scene") return layerCount;
+    if (id === "members") return memberCount > 0 ? memberCount : undefined;
     if (id === "discussion") return connected ? messageCount || undefined : "·";
     return undefined;
   };
@@ -130,11 +136,18 @@ export function ResizableRightPanel() {
       className="relative flex h-full min-h-0 shrink-0 flex-col border-l border-[var(--flux-border)] bg-black"
       style={{ width }}
     >
-      <ResizeHandle axis="column" edge="start" onDrag={(dx) => setWidth(width - dx)} />
+      <ResizeHandle
+        overlay
+        axis="column"
+        edge="start"
+        className="absolute inset-y-0 left-0 z-50 w-3 -translate-x-1/2"
+        onDrag={adjustWidth}
+      />
 
       <PanelTabBar
         layoutMode={layoutMode}
         focusedRegion={focusedRegion}
+        badgeFor={badgeFor}
         onSelectTab={(id) => focusRegion(id)}
         onToggleLayout={() =>
           setLayoutMode(layoutMode === "stack" ? "single" : "stack")

@@ -3,27 +3,20 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import type { CatalogScene, UserScene } from "@flux/shared";
+import type { CatalogScene } from "@flux/shared";
 import { JoinCodeInput } from "@/components/room/JoinCodeInput";
 import { useAuthStore } from "@/store/authStore";
-import { useRoomSessionStore } from "@/store/roomSessionStore";
-import {
-  createRoom,
-  fetchCatalogScenes,
-  fetchPublicRooms,
-  fetchUserScenes,
-  joinRoomByCode,
-} from "@/lib/rooms/api";
+import { createRoom, joinRoomByCode } from "@/lib/rooms/api";
+import { commitRoomMembership } from "@/lib/rooms/session";
+import { useHomeHubData } from "@/hooks/useHomeHubData";
 import {
   buildWorkspacePath,
-  clearPendingRoomJoin,
   TEST_LAYOUTS,
   type TestLayoutId,
 } from "@/lib/physics/testLayouts";
 import { snapshotForServer } from "@/lib/scene/storedScene";
 import { FLUX_WORLD } from "@/lib/physics/worldSpace";
 import { updateDisplayName } from "@/lib/auth/profile";
-import { isSupabaseConfigured } from "@/lib/supabase/env";
 
 function SectionTitle({ children }: { children: ReactNode }) {
   return (
@@ -36,64 +29,50 @@ export function HomeHub() {
   const user = useAuthStore((s) => s.user);
   const profile = useAuthStore((s) => s.profile);
   const signOut = useAuthStore((s) => s.signOut);
-  const setMembership = useRoomSessionStore((s) => s.setMembership);
+  const { catalog, myScenes, publicRooms, loadState, loadError, refresh } = useHomeHubData();
 
-  const [catalog, setCatalog] = useState<CatalogScene[]>([]);
-  const [myScenes, setMyScenes] = useState<UserScene[]>([]);
-  const [publicRooms, setPublicRooms] = useState<
-    Array<{ id: string; slug: string; title: string; module: string; joinCode: string }>
-  >([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [joinLoading, setJoinLoading] = useState(false);
+  const [launchingBenchId, setLaunchingBenchId] = useState<TestLayoutId | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [nameEdit, setNameEdit] = useState("");
+
+  const error = actionError ?? loadError;
 
   const goWorkspace = useCallback(
     (
       membership: Awaited<ReturnType<typeof joinRoomByCode>>,
-      opts?: { benchId?: TestLayoutId },
+      opts?: { benchId?: TestLayoutId; anonymous?: boolean },
     ) => {
-      setMembership(membership);
+      commitRoomMembership(membership, { anonymous: opts?.anonymous });
       router.push(buildWorkspacePath(membership.module, membership.slug, opts?.benchId));
     },
-    [router, setMembership],
+    [router],
   );
 
-  useEffect(() => {
-    if (!isSupabaseConfigured()) {
-      setError(
-        "Supabase is not configured. Add keys to apps/web/.env.local and restart the dev server.",
-      );
-      return;
-    }
-    void fetchCatalogScenes().then(setCatalog);
-    void fetchPublicRooms().then(setPublicRooms);
-    if (user) void fetchUserScenes().then(setMyScenes);
-  }, [user]);
-
   const handleJoin = async (code: string, anonymous = false) => {
-    setError(null);
-    setLoading(true);
+    setActionError(null);
+    setJoinLoading(true);
     try {
       const m = await joinRoomByCode(code, { anonymous });
-      goWorkspace(m);
+      goWorkspace(m, { anonymous });
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not join room");
+      setActionError(e instanceof Error ? e.message : "Could not join room");
     } finally {
-      setLoading(false);
+      setJoinLoading(false);
     }
   };
 
   const handleLaunchTestLayout = async (layoutId: TestLayoutId) => {
-    setError(null);
+    setActionError(null);
     if (!user) {
       router.push("/auth/login");
       return;
     }
-    setLoading(true);
+    setLaunchingBenchId(layoutId);
     try {
       const layout = TEST_LAYOUTS.find((l) => l.id === layoutId);
       if (!layout) {
-        setError("Unknown bench");
+        setActionError("Unknown bench");
         return;
       }
       const simSnap = layout.build(FLUX_WORLD.WIDTH, FLUX_WORLD.HEIGHT);
@@ -104,13 +83,11 @@ export function HomeHub() {
         visibility: "private",
         initialScene: stored as unknown as Record<string, unknown>,
       });
-      clearPendingRoomJoin();
-      setMembership(m);
-      router.push(buildWorkspacePath(m.module, m.slug, layoutId));
+      goWorkspace(m, { benchId: layoutId });
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not open test layout");
+      setActionError(e instanceof Error ? e.message : "Could not open test layout");
     } finally {
-      setLoading(false);
+      setLaunchingBenchId(null);
     }
   };
 
@@ -119,8 +96,8 @@ export function HomeHub() {
       router.push("/auth/login");
       return;
     }
-    setLoading(true);
-    setError(null);
+    setJoinLoading(true);
+    setActionError(null);
     try {
       const m = await createRoom({
         title: scene.title,
@@ -130,21 +107,21 @@ export function HomeHub() {
       });
       goWorkspace(m);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not create room");
+      setActionError(e instanceof Error ? e.message : "Could not create room");
     } finally {
-      setLoading(false);
+      setJoinLoading(false);
     }
   };
 
   const saveDisplayName = async () => {
     if (!nameEdit.trim()) return;
-    setError(null);
+    setActionError(null);
     try {
       await updateDisplayName(nameEdit.trim());
       await useAuthStore.getState().refreshProfile();
       setNameEdit("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not update name");
+      setActionError(e instanceof Error ? e.message : "Could not update name");
     }
   };
 
@@ -197,13 +174,13 @@ export function HomeHub() {
             <p className="mb-2 mt-1 text-[10px] leading-snug text-white/38">
               Six-digit room codes mirror the header chip inside a workspace.
             </p>
-            <JoinCodeInput onSubmit={(c) => handleJoin(c)} loading={loading} />
+            <JoinCodeInput onSubmit={(c) => handleJoin(c)} loading={joinLoading} />
           </div>
 
           {!user && (
             <button
               type="button"
-              disabled={loading}
+              disabled={joinLoading || launchingBenchId !== null}
               onClick={() => {
                 const code = window.prompt("Public room · 6-digit code");
                 if (code) void handleJoin(code, true);
@@ -267,6 +244,21 @@ export function HomeHub() {
                 {error}
               </p>
             )}
+            {loadState === "loading" && catalog.length === 0 && publicRooms.length === 0 && (
+              <p className="mb-4 text-sm text-white/40">Loading rooms and scenes…</p>
+            )}
+            {loadState === "ready" && catalog.length === 0 && publicRooms.length === 0 && (
+              <div className="mb-4 flex flex-wrap items-center gap-2">
+                <p className="text-sm text-white/45">No scenes or public rooms loaded yet.</p>
+                <button
+                  type="button"
+                  onClick={() => void refresh()}
+                  className="flux-btn px-2.5 py-1 text-[11px] text-white/70"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
 
             {user && profile && (
               <section className="mb-2 max-w-lg">
@@ -313,7 +305,7 @@ export function HomeHub() {
                 <button
                   key={layout.id}
                   type="button"
-                  disabled={loading || !user}
+                  disabled={!user || launchingBenchId === layout.id}
                   onClick={() => void handleLaunchTestLayout(layout.id)}
                   className="group relative overflow-hidden rounded-lg border border-[var(--flux-border)] bg-black px-4 py-3.5 text-left transition hover:border-[var(--flux-border-hover)] hover:bg-white/[0.02] disabled:opacity-40"
                 >
@@ -348,7 +340,7 @@ export function HomeHub() {
                 <button
                   key={scene.id}
                   type="button"
-                  disabled={loading}
+                  disabled={joinLoading || launchingBenchId !== null}
                   onClick={() => void handleCreateFromCatalog(scene)}
                   className="rounded-lg border border-[var(--flux-border)] bg-black px-4 py-3.5 text-left transition hover:border-[var(--flux-border-hover)] hover:bg-white/[0.02]"
                 >
@@ -408,7 +400,7 @@ export function HomeHub() {
                     </div>
                     <button
                       type="button"
-                      disabled={loading}
+                      disabled={joinLoading || launchingBenchId !== null}
                       onClick={() => void handleJoin(r.joinCode, !user)}
                       className="flux-btn px-3 py-1.5 text-[11px] text-white/75"
                     >

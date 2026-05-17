@@ -16,7 +16,9 @@ export type TestLayoutId =
   | "zero-g-swarm"
   | "inclined-plane"
   | "atwood-twin"
-  | "ballistics-gallery";
+  | "ballistics-gallery"
+  | "demo"
+  | "soft-body";
 
 export interface TestLayout {
   id: TestLayoutId;
@@ -159,7 +161,7 @@ export function buildNewtonCradle(w: number, h: number): SimulationSnapshot {
     lead.velocityY = -1.2;
   }
 
-  return { bodies, springs, tick: 0 };
+  return { bodies, springs, ropes: [], tick: 0 };
 }
 
 export function buildChaosPendulum(w: number, h: number): SimulationSnapshot {
@@ -191,6 +193,7 @@ export function buildChaosPendulum(w: number, h: number): SimulationSnapshot {
       spring("cp_s1", "cp_link1", "cp_link2", DEFAULT_SPRING_STIFFNESS * 1.2, DEFAULT_SPRING_DAMPING),
       spring("cp_s2", "cp_link2", "cp_link3", DEFAULT_SPRING_STIFFNESS * 1.15, DEFAULT_SPRING_DAMPING),
     ],
+    ropes: [],
     tick: 0,
   };
 }
@@ -223,7 +226,7 @@ export function buildDominoWave(w: number, h: number): SimulationSnapshot {
       }),
     );
   }
-  return { bodies, springs: [], tick: 0 };
+  return { bodies, springs: [], ropes: [], tick: 0 };
 }
 
 export function buildBouncyTower(w: number, h: number): SimulationSnapshot {
@@ -254,7 +257,7 @@ export function buildBouncyTower(w: number, h: number): SimulationSnapshot {
       friction: 0.18,
     }),
   );
-  return { bodies, springs: [], tick: 0 };
+  return { bodies, springs: [], ropes: [], tick: 0 };
 }
 
 export function buildSpringTrampoline(w: number, h: number): SimulationSnapshot {
@@ -279,6 +282,7 @@ export function buildSpringTrampoline(w: number, h: number): SimulationSnapshot 
       spring("st_s3", "st_a3", "st_deck", 0.09, 0.055),
       spring("st_s4", "st_a4", "st_deck", 0.09, 0.055),
     ],
+    ropes: [],
     tick: 0,
   };
 }
@@ -305,6 +309,7 @@ export function buildCollisionGauntlet(w: number, h: number): SimulationSnapshot
   return {
     bodies,
     springs: [spring("cg_rod", "cg_pivot", "cg_weight", LINK_SPRING_STIFFNESS * 1.05, LINK_SPRING_DAMPING)],
+    ropes: [],
     tick: 0,
   };
 }
@@ -337,7 +342,7 @@ export function buildZeroGSwarm(w: number, h: number): SimulationSnapshot {
       idx += 1;
     }
   }
-  return { bodies, springs: [], tick: 0 };
+  return { bodies, springs: [], ropes: [], tick: 0 };
 }
 
 export function buildInclinedPlane(w: number, h: number): SimulationSnapshot {
@@ -364,6 +369,7 @@ export function buildInclinedPlane(w: number, h: number): SimulationSnapshot {
       circle("ip_m3", "Marker-3", rampX - rampLong * 0.08, h * 0.22, 14, { restitution: 0.46 }),
     ],
     springs: [],
+    ropes: [],
     tick: 0,
   };
 }
@@ -384,6 +390,7 @@ export function buildAtwoodTwin(w: number, h: number): SimulationSnapshot {
       spring("aw_sL", "aw_pulley", "aw_heavy", LINK_SPRING_STIFFNESS * 1.25, LINK_SPRING_DAMPING),
       spring("aw_sR", "aw_pulley", "aw_light", LINK_SPRING_STIFFNESS * 1.25, LINK_SPRING_DAMPING),
     ],
+    ropes: [],
     tick: 0,
   };
 }
@@ -418,7 +425,158 @@ export function buildBallisticsGallery(w: number, h: number): SimulationSnapshot
       );
     }
   }
-  return { bodies, springs: [], tick: 0 };
+  return { bodies, springs: [], ropes: [], tick: 0 };
+}
+
+/**
+ * DEMO: long centered Newton cradle (default 13 pendulums). Small spheres, spacing ≈ 2×radius + ε.
+ * No friction or air drag.
+ */
+export function buildDemoShowcase(w: number, h: number): SimulationSnapshot {
+  const bodies: SimBodySnapshot[] = [];
+  const springs: SpringSnapshot[] = [];
+
+  const cx = w / 2;
+  /** Narrow row fits 10–15 bobs across a 3000-wide world with margin. */
+  const nCradle = 13;
+  const margin = w * 0.06;
+  const maxSpan = w - margin * 2;
+  const ballR = Math.min(
+    32,
+    Math.max(20, (maxSpan - (nCradle - 1) * 0.35) / (2 * (nCradle - 1) || 1)),
+  );
+  /** Center-to-center = 2×radius (radius is half the neighbor distance); +ε so edges barely clear at rest. */
+  const spacing = ballR * 2 + 0.35;
+  const ballY = h * 0.5;
+  const chordLen = Math.min(h * 0.24, 52 + ballR * 8.5);
+  const anchorY = ballY - chordLen;
+  const startX = cx - spacing * ((nCradle - 1) / 2);
+
+  const zeroDrag = {
+    friction: 0,
+    frictionStatic: 0,
+    frictionAir: 0,
+  } as const;
+
+  for (let i = 0; i < nCradle; i++) {
+    const x = startX + i * spacing;
+    const aid = `demo_nc_a_${i}`;
+    const bid = `demo_nc_b_${i}`;
+    bodies.push(
+      circle(aid, `Cradle-anchor-${i + 1}`, x, anchorY, Math.max(3, ballR * 0.1), {
+        isStatic: true,
+        restitution: 0,
+        ...zeroDrag,
+      }),
+    );
+    bodies.push(
+      circle(bid, `Cradle-ball-${i + 1}`, x, ballY, ballR, {
+        restitution: 1,
+        mass: 0.28 + ballR * 0.018,
+        ...zeroDrag,
+      }),
+    );
+    springs.push(
+      spring(`demo_nc_s_${i}`, aid, bid, DEFAULT_SPRING_STIFFNESS * 1.02, DEFAULT_SPRING_DAMPING),
+    );
+  }
+
+  const lead = bodies.find((b) => b.id === "demo_nc_b_0");
+  if (lead) {
+    const pull = ballR * 2.25;
+    lead.x -= pull;
+    lead.velocityX = -9.5;
+    lead.velocityY = -0.22;
+  }
+
+  return { bodies, springs, ropes: [], tick: 0 };
+}
+
+/**
+ * Spring-mass soft body: dense 4×4 node mesh (edges + both diagonals for shear) hung from two ceiling ties.
+ * Sized for default room object_limit (see sceneLimits.ts).
+ */
+export function buildSoftBodyMesh(w: number, h: number): SimulationSnapshot {
+  const bodies: SimBodySnapshot[] = [];
+  const springs: SpringSnapshot[] = [];
+
+  const nx = 10;
+  const ny = 10;
+  const cell = 104;
+  const nodeR = cell * 0.17;
+  const cx = w * 0.5;
+  const cy = h * 0.44;
+  const topY = cy - ((ny - 1) / 2) * cell;
+  const hangY = topY - 100;
+
+  const nodeId = (i: number, j: number) => `sb_${i}_${j}`;
+
+  let nodeSerial = 0;
+  for (let j = 0; j < ny; j++) {
+    for (let i = 0; i < nx; i++) {
+      const x = cx + (i - (nx - 1) / 2) * cell;
+      const y = cy + (j - (ny - 1) / 2) * cell;
+      nodeSerial += 1;
+      bodies.push(
+        circle(nodeId(i, j), `Node-${nodeSerial}`, x, y, nodeR, {
+          mass: 0.52,
+          restitution: 0.22,
+          friction: 0.18,
+          frictionStatic: 0.22,
+          frictionAir: 0.004,
+        }),
+      );
+    }
+  }
+
+  const kMesh = DEFAULT_SPRING_STIFFNESS * 0.52;
+  const dMesh = DEFAULT_SPRING_DAMPING * 1.12;
+  const kHang = DEFAULT_SPRING_STIFFNESS * 0.75;
+  let sid = 0;
+
+  const pushSpring = (a: string, b: string, stiffness: number, damping: number, length: number) => {
+    springs.push(spring(`sb_s_${sid++}`, a, b, stiffness, damping, length));
+  };
+
+  const lenH = cell;
+  const lenV = cell;
+  const lenD = cell * Math.SQRT2;
+
+  for (let j = 0; j < ny; j++) {
+    for (let i = 0; i < nx; i++) {
+      if (i + 1 < nx) pushSpring(nodeId(i, j), nodeId(i + 1, j), kMesh, dMesh, lenH);
+      if (j + 1 < ny) pushSpring(nodeId(i, j), nodeId(i, j + 1), kMesh, dMesh, lenV);
+      if (i + 1 < nx && j + 1 < ny) pushSpring(nodeId(i, j), nodeId(i + 1, j + 1), kMesh, dMesh, lenD);
+      if (i + 1 < nx && j > 0) pushSpring(nodeId(i, j), nodeId(i + 1, j - 1), kMesh, dMesh, lenD);
+    }
+  }
+
+  const xL = cx - ((nx - 1) / 2) * cell;
+  const xR = cx + ((nx - 1) / 2) * cell;
+  bodies.push(
+    circle("sb_tie_L", "Soft-tie-L", xL, hangY, 6, {
+      isStatic: true,
+      friction: 0.95,
+      restitution: 0,
+    }),
+    circle("sb_tie_R", "Soft-tie-R", xR, hangY, 6, {
+      isStatic: true,
+      friction: 0.95,
+      restitution: 0,
+    }),
+  );
+  const hangLen = topY - hangY;
+  pushSpring("sb_tie_L", nodeId(0, 0), kHang, dMesh, hangLen);
+  pushSpring("sb_tie_R", nodeId(nx - 1, 0), kHang, dMesh, hangLen);
+
+  const corner = bodies.find((b) => b.id === nodeId(nx - 1, ny - 1));
+  if (corner) {
+    corner.velocityX = 38;
+    corner.velocityY = 6;
+    corner.angularVelocity = 0.08;
+  }
+
+  return { bodies, springs, ropes: [], tick: 0 };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -436,6 +594,7 @@ export function buildCatalogStarterMixed(w: number, h: number): SimulationSnapsh
       box("cat_anchor", "Anchor", w * 0.3, y - 260, 14, 14, { isStatic: true }),
     ],
     springs: [spring("cat_s1", "cat_anchor", "cat_a", DEFAULT_SPRING_STIFFNESS * 1.4, DEFAULT_SPRING_DAMPING)],
+    ropes: [],
     tick: 0,
   };
 }
@@ -449,6 +608,7 @@ export function buildCatalogFreeFall(w: number, h: number): SimulationSnapshot {
       circle("cf_light", "Light", w * 0.54, y - 220, 20, { mass: 0.9, restitution: 0.15 }),
     ],
     springs: [],
+    ropes: [],
     tick: 0,
   };
 }
@@ -465,6 +625,7 @@ export function buildCatalogCollisionIntro(w: number, h: number): SimulationSnap
       }),
     ],
     springs: [],
+    ropes: [],
     tick: 0,
   };
 }
@@ -477,6 +638,7 @@ export function buildCatalogSpringIntro(w: number, h: number): SimulationSnapsho
       circle("cs_wt", "Weight", w * 0.58, cy + 40, 24, { mass: 2.4 }),
     ],
     springs: [spring("cs_main", "cs_post", "cs_wt", DEFAULT_SPRING_STIFFNESS * 1.1, DEFAULT_SPRING_DAMPING * 0.85)],
+    ropes: [],
     tick: 0,
   };
 }
@@ -486,6 +648,24 @@ export function buildCatalogSpringIntro(w: number, h: number): SimulationSnapsho
 const ACCENT = "#9aa8bc";
 
 export const TEST_LAYOUTS: TestLayout[] = [
+  {
+    id: "demo",
+    title: "DEMO",
+    description:
+      "Thirteen small bobs in one long Newton cradle (r = ½ neighbor spacing), centered, zero friction and air drag, fully elastic.",
+    tests: "Long impulse chain · tuned spacing",
+    accent: ACCENT,
+    build: buildDemoShowcase,
+  },
+  {
+    id: "soft-body",
+    title: "Soft body",
+    description:
+      "Sixteen mass nodes in a square lattice: horizontal, vertical, and diagonal springs for stretch and shear, hung from two ties—jiggles as one deformable sheet.",
+    tests: "Spring mesh · shear ribs · soft constraints",
+    accent: ACCENT,
+    build: buildSoftBodyMesh,
+  },
   {
     id: "newton-cradle",
     title: "Newton cradle",

@@ -1,24 +1,42 @@
 /**
- * Rope links use stiff constraints (high stiffness, moderate damping) — they sag under
- * gravity like cable, unlike low-stiffness springs.
+ * Verlet rope — particle chain with distance constraints (PBD-style).
+ * Endpoints are pinned to Matter anchor bodies; interior particles collide with the scene.
  */
 
-export const ROPE_SEGMENT_RADIUS = 9;
+/** Target rest length between consecutive particles (world px). */
+export const ROPE_PARTICLE_SPACING = 14;
 
-/** Target arc length per link in world px (more spacing → fewer links). */
-export const ROPE_SPACING_TARGET = 68;
+export const ROPE_INTERIOR_MIN = 2;
 
-export const ROPE_SEGMENTS_MIN = 4;
+export const ROPE_INTERIOR_MAX = 40;
 
-export const ROPE_SEGMENTS_MAX = 16;
+/** Collision radius for interior particles (world px). */
+export const ROPE_PARTICLE_RADIUS = 5;
 
-/** Stiff link — nearly fixed length, still settles under load. */
-export const ROPE_LINK_STIFFNESS = 0.94;
+/** Verlet substeps per engine step when ropes are active. */
+export const ROPE_VERLET_SUBSTEPS = 3;
 
-export const ROPE_LINK_DAMPING = 0.07;
+/** Distance-constraint relaxation iterations per Verlet substep. */
+export const ROPE_CONSTRAINT_ITERATIONS = 8;
 
-export const ROPE_SEGMENT_DENSITY = 0.0012;
+/** Gravity scale applied to rope particles (matches Matter gravity feel). */
+export const ROPE_GRAVITY_SCALE = 1;
 
-export const ROPE_SEGMENT_FRICTION = 0.35;
+/** Velocity damping per substep (0–1, lower = more damping). */
+export const ROPE_VERLET_DAMPING = 0.998;
 
-export const ROPE_SEGMENT_RESTITUTION = 0.08;
+/** Collision separation skin (px). */
+export const ROPE_COLLISION_SKIN = 0.5;
+
+/** Extra collision-only passes after constraints (prevents tunneling). */
+export const ROPE_COLLISION_ITERATIONS = 4;
+
+/** Swept circle samples per particle per collision pass. */
+export const ROPE_COLLISION_SWEEP_SAMPLES_MAX = 8;
+
+/** Force scale from rope tension onto anchor bodies. */
+export const ROPE_ANCHOR_FORCE_SCALE = 0.00045;
+
+/** Legacy snapshot fields — not used by Verlet solver. */
+export const ROPE_LINK_STIFFNESS = 1;
+export const ROPE_LINK_DAMPING = 0.2;

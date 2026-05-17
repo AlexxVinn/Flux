@@ -5,7 +5,7 @@ import { useSimulationStore, usePrimarySelection, isAtSharedSetupFrame } from "@
 import { useCanWriteInRoom, useRoomSessionStore } from "@/store/roomSessionStore";
 import { useRoomSceneCollaborationStore } from "@/store/roomSceneCollaborationStore";
 import { ScrubNumField } from "./ScrubNumField";
-import type { SimBodySnapshot, SpringSnapshot } from "@/lib/physics/types";
+import type { RopeSnapshot, SimBodySnapshot, SpringSnapshot } from "@/lib/physics/types";
 import { FLUX_WORLD } from "@/lib/physics/worldSpace";
 
 function Toggle({
@@ -57,6 +57,7 @@ export function PropertyInspector() {
   const toggleGravity = useSimulationStore((s) => s.toggleGravity);
   const updateBody = useSimulationStore((s) => s.updateBody);
   const updateSpring = useSimulationStore((s) => s.updateSpring);
+  const updateRope = useSimulationStore((s) => s.updateRope);
   const canWrite = useCanWriteInRoom();
   const roomSceneRoomId = useRoomSceneCollaborationStore((s) => s.roomId);
   const membership = useRoomSessionStore((s) => s.membership);
@@ -70,8 +71,9 @@ export function PropertyInspector() {
     !canWrite ||
     (collaborative && !atSharedSetup);
 
-  const body = snapshot.bodies.find((b) => b.id === primaryId);
+  const body = snapshot.bodies.find((b) => b.id === primaryId && b.entityKind !== "ropeSegment");
   const spring = snapshot.springs.find((s) => s.id === primaryId);
+  const rope = (snapshot.ropes ?? []).find((r) => r.id === primaryId);
 
   const preview = useCallback(
     (patch: Partial<SimBodySnapshot>) => {
@@ -108,6 +110,25 @@ export function PropertyInspector() {
     [primaryId, locked, updateSpring],
   );
 
+  const previewRope = useCallback(
+    (patch: Partial<Pick<RopeSnapshot, "linkStiffness" | "linkDamping">>) => {
+      if (!primaryId || locked) return;
+      updateRope(primaryId, patch, { commit: false });
+    },
+    [primaryId, locked, updateRope],
+  );
+
+  const commitRope = useCallback(
+    (
+      patch: Partial<Pick<RopeSnapshot, "linkStiffness" | "linkDamping">>,
+      summary: string,
+    ) => {
+      if (!primaryId || locked) return;
+      updateRope(primaryId, patch, { commit: true, summary });
+    },
+    [primaryId, locked, updateRope],
+  );
+
   if (!primaryId) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 px-4 py-8 text-center">
@@ -116,16 +137,75 @@ export function PropertyInspector() {
         </div>
         <p className="text-xs font-medium text-flux-text">No selection</p>
         <p className="max-w-[220px] text-[11px] leading-relaxed text-flux-muted">
-          Click an object on the canvas or in Layers. Hold Ctrl/Cmd to multi-select,
-          Shift for range.
+          Click to select. Drag empty space to box-select. Shift adds to selection;
+          Ctrl removes. Drag selected bodies to move them together.
         </p>
       </div>
     );
   }
 
+  if (rope && !body) {
+    const a = snapshot.bodies.find((b) => b.id === rope.bodyA);
+    const b = snapshot.bodies.find((b) => b.id === rope.bodyB);
+
+    return (
+      <div
+        className={`flex flex-col gap-3 px-2 py-2 transition-opacity ${
+          locked ? "opacity-[0.52]" : ""
+        }`}
+      >
+        <div>
+          <p className="font-mono text-xs font-medium text-flux-text">{rope.displayName}</p>
+          <p className="text-[10px] text-flux-muted">Rope · {rope.segmentCount} links</p>
+          <div className="mt-2 rounded-md border border-flux-border/60 bg-black/25 px-2 py-1.5 font-mono text-[10px] text-flux-muted">
+            <p>A → {a?.displayName ?? rope.bodyA}</p>
+            <p>B → {b?.displayName ?? rope.bodyB}</p>
+          </div>
+          {isPlaying && (
+            <p className="mt-2 rounded-md border border-flux-border/60 bg-black/30 px-2 py-1.5 text-[10px] leading-snug text-flux-muted">
+              Simulation running — values are read-only. Pause to edit.
+            </p>
+          )}
+        </div>
+
+        <fieldset className="flex flex-col gap-1.5" disabled={locked}>
+          <legend className="mb-0.5 text-[8px] font-semibold uppercase tracking-widest text-flux-muted">
+            Rope
+          </legend>
+          <ScrubNumField
+            label="Link stiffness"
+            value={rope.linkStiffness}
+            step={0.001}
+            min={0.001}
+            max={1}
+            decimals={3}
+            locked={locked}
+            onPreview={(linkStiffness) => previewRope({ linkStiffness })}
+            onCommit={(linkStiffness) =>
+              commitRope({ linkStiffness }, `Set ${rope.displayName} link stiffness`)
+            }
+          />
+          <ScrubNumField
+            label="Link damping"
+            value={rope.linkDamping}
+            step={0.001}
+            min={0}
+            max={1}
+            decimals={3}
+            locked={locked}
+            onPreview={(linkDamping) => previewRope({ linkDamping })}
+            onCommit={(linkDamping) =>
+              commitRope({ linkDamping }, `Set ${rope.displayName} link damping`)
+            }
+          />
+        </fieldset>
+      </div>
+    );
+  }
+
   if (spring && !body) {
-    const a = snapshot.bodies.find((b) => b.id === spring.bodyA);
-    const b = snapshot.bodies.find((b) => b.id === spring.bodyB);
+    const sa = snapshot.bodies.find((b) => b.id === spring.bodyA);
+    const sb = snapshot.bodies.find((b) => b.id === spring.bodyB);
 
     return (
       <div
@@ -137,8 +217,8 @@ export function PropertyInspector() {
           <p className="font-mono text-xs font-medium text-flux-text">{spring.displayName}</p>
           <p className="text-[10px] text-flux-muted">Spring constraint</p>
           <div className="mt-2 rounded-md border border-flux-border/60 bg-black/25 px-2 py-1.5 font-mono text-[10px] text-flux-muted">
-            <p>A → {a?.displayName ?? spring.bodyA}</p>
-            <p>B → {b?.displayName ?? spring.bodyB}</p>
+            <p>A → {sa?.displayName ?? spring.bodyA}</p>
+            <p>B → {sb?.displayName ?? spring.bodyB}</p>
           </div>
           {isPlaying && (
             <p className="mt-2 rounded-md border border-flux-border/60 bg-black/30 px-2 py-1.5 text-[10px] leading-snug text-flux-muted">

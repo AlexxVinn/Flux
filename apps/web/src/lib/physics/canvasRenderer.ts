@@ -1,4 +1,10 @@
+import type { PeerEntityMark } from "@/lib/collaboration/peerSelection";
+import { drawPeerSelectionOverlay } from "@/lib/collaboration/peerCanvasOverlay";
+import { strokeSmoothRope } from "./ropeRender";
+import { attachWorldFromLocal } from "./bodyAttachPoint";
+import { ropePolylineFromSnapshot } from "./ropeGeometry";
 import type { CollisionDebugPoint, SimulationSnapshot } from "./types";
+import type { WorldRect } from "./selectionUtils";
 import type { DebugFlags } from "./debugTypes";
 import { FLUX_WORLD, type SceneCamera } from "./worldSpace";
 import { COLLISION_FRAME_WALL_THICKNESS } from "./physicsConstants";
@@ -14,6 +20,28 @@ export interface RenderConfig {
   debug: DebugFlags;
   gravityForBody?: (id: string) => { x: number; y: number };
   collisions?: CollisionDebugPoint[];
+  /** Active marquee in world space (drawn while dragging select tool). */
+  selectionMarquee?: WorldRect | null;
+  /** Other users' selections (entity id → peers). */
+  peerMarksByEntity?: Map<string, PeerEntityMark[]>;
+  /** Rubber-band while placing a spring or rope (world space). */
+  linkPlacementPreview?: {
+    from: { x: number; y: number };
+    to: { x: number; y: number };
+    kind: "spring" | "rope";
+  } | null;
+}
+
+function springEndpoints(
+  spring: SimulationSnapshot["springs"][number],
+  snapshot: SimulationSnapshot,
+): { ax: number; ay: number; bx: number; by: number } | null {
+  const a = snapshot.bodies.find((b) => b.id === spring.bodyA);
+  const b = snapshot.bodies.find((b) => b.id === spring.bodyB);
+  if (!a?.visible || !b?.visible) return null;
+  const aw = attachWorldFromLocal(a, spring.anchorA?.x ?? 0, spring.anchorA?.y ?? 0);
+  const bw = attachWorldFromLocal(b, spring.anchorB?.x ?? 0, spring.anchorB?.y ?? 0);
+  return { ax: aw.x, ay: aw.y, bx: bw.x, by: bw.y };
 }
 
 const VEL_SCALE = 12;
@@ -33,6 +61,9 @@ export function renderSimulation(
     debug,
     gravityForBody,
     collisions = [],
+    selectionMarquee = null,
+    peerMarksByEntity,
+    linkPlacementPreview = null,
   } = config;
   const selectedSet = new Set(selectedIds);
 
@@ -55,7 +86,7 @@ export function renderSimulation(
   );
 
   for (const body of sorted) {
-    if (!body.visible) continue;
+    if (!body.visible || body.entityKind === "ropeSegment") continue;
 
     const isSelected = selectedSet.has(body.id);
     const isHovered = body.id === hoveredId;
@@ -178,35 +209,100 @@ export function renderSimulation(
     }
   }
 
-  if (debug.springLinks || debug.springTension) {
-    for (const spring of snapshot.springs) {
-      if (!spring.visible) continue;
-      const a = snapshot.bodies.find((b) => b.id === spring.bodyA);
-      const b = snapshot.bodies.find((b) => b.id === spring.bodyB);
-      if (!a?.visible || !b?.visible) continue;
+  for (const rope of snapshot.ropes ?? []) {
+    if (!rope.visible) continue;
+    const a = snapshot.bodies.find((b) => b.id === rope.bodyA);
+    const b = snapshot.bodies.find((b) => b.id === rope.bodyB);
+    if (!a?.visible || !b?.visible) continue;
 
-      if (debug.springLinks) {
-        ctx.strokeStyle = "rgba(170,170,170,0.7)";
-        ctx.lineWidth = 1 / camera.zoom;
-        ctx.setLineDash([4, 4]);
-        ctx.beginPath();
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(b.x, b.y);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
+    const pts = ropePolylineFromSnapshot(rope);
+    if (pts.length < 2) continue;
 
-      if (debug.springTension) {
-        const mx = (a.x + b.x) / 2;
-        const my = (a.y + b.y) / 2;
-        const dist = Math.hypot(b.x - a.x, b.y - a.y);
-        const rest = dist;
-        const tension = Math.abs(dist - rest) * spring.stiffness * 100;
-        ctx.fillStyle = "rgba(251,191,36,0.85)";
-        ctx.font = `${9 / camera.zoom}px monospace`;
-        ctx.fillText(`T ${tension.toFixed(1)}`, mx + 4 / camera.zoom, my - 4 / camera.zoom);
-      }
+    const isSelected = selectedSet.has(rope.id);
+    const isHovered = rope.id === hoveredId;
+    ctx.strokeStyle = isSelected
+      ? "rgba(244,244,245,0.92)"
+      : isHovered
+        ? "rgba(200,210,220,0.85)"
+        : "rgba(150,160,175,0.72)";
+    ctx.lineWidth = (isSelected ? 2.2 : 1.35) / camera.zoom;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    strokeSmoothRope(ctx, pts);
+    ctx.stroke();
+  }
+
+  for (const spring of snapshot.springs) {
+    if (!spring.visible) continue;
+    const ends = springEndpoints(spring, snapshot);
+    if (!ends) continue;
+
+    const isSelected = selectedSet.has(spring.id);
+    const isHovered = spring.id === hoveredId;
+    ctx.strokeStyle = isSelected
+      ? "rgba(196,181,253,0.95)"
+      : isHovered
+        ? "rgba(167,139,250,0.88)"
+        : "rgba(140,130,170,0.65)";
+    ctx.lineWidth = (isSelected ? 2.2 : 1.35) / camera.zoom;
+    ctx.setLineDash([5 / camera.zoom, 4 / camera.zoom]);
+    ctx.beginPath();
+    ctx.moveTo(ends.ax, ends.ay);
+    ctx.lineTo(ends.bx, ends.by);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const r = (isSelected ? 4.5 : 3.5) / camera.zoom;
+    ctx.fillStyle = isSelected ? "rgba(196,181,253,0.95)" : "rgba(167,139,250,0.85)";
+    for (const p of [
+      { x: ends.ax, y: ends.ay },
+      { x: ends.bx, y: ends.by },
+    ]) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fill();
     }
+
+    if (debug.springTension) {
+      const mx = (ends.ax + ends.bx) / 2;
+      const my = (ends.ay + ends.by) / 2;
+      const dist = Math.hypot(ends.bx - ends.ax, ends.by - ends.ay);
+      const tension = Math.abs(dist - spring.length) * spring.stiffness * 100;
+      ctx.fillStyle = "rgba(251,191,36,0.85)";
+      ctx.font = `${9 / camera.zoom}px monospace`;
+      ctx.fillText(`T ${tension.toFixed(1)}`, mx + 4 / camera.zoom, my - 4 / camera.zoom);
+    }
+  }
+
+  if (linkPlacementPreview) {
+    const { from, to, kind } = linkPlacementPreview;
+    ctx.save();
+    ctx.strokeStyle =
+      kind === "rope" ? "rgba(148,163,184,0.9)" : "rgba(167,139,250,0.85)";
+    ctx.lineWidth = 1.5 / camera.zoom;
+    ctx.setLineDash([6 / camera.zoom, 4 / camera.zoom]);
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const r = 4 / camera.zoom;
+    ctx.fillStyle =
+      kind === "rope" ? "rgba(148,163,184,0.95)" : "rgba(167,139,250,0.95)";
+    for (const p of [from, to]) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  if (peerMarksByEntity && peerMarksByEntity.size > 0) {
+    drawPeerSelectionOverlay(ctx, snapshot, peerMarksByEntity, camera.zoom);
+  }
+
+  if (selectionMarquee) {
+    drawSelectionMarquee(ctx, selectionMarquee, camera.zoom);
   }
 
   if (debug.collisionContacts || debug.collisionNormals) {
@@ -339,6 +435,26 @@ function drawGlobalGravityHint(ctx: CanvasRenderingContext2D, width: number): vo
   ctx.fillStyle = "rgba(255,255,255,0.35)";
   ctx.font = "10px monospace";
   ctx.fillText("↓ gravity +Y", width - 88, 16);
+}
+
+function drawSelectionMarquee(
+  ctx: CanvasRenderingContext2D,
+  rect: WorldRect,
+  zoom: number,
+): void {
+  const w = rect.maxX - rect.minX;
+  const h = rect.maxY - rect.minY;
+  if (w < 2 / zoom && h < 2 / zoom) return;
+
+  ctx.save();
+  ctx.fillStyle = "rgba(110, 231, 183, 0.07)";
+  ctx.strokeStyle = "rgba(110, 231, 183, 0.55)";
+  ctx.lineWidth = 1.25 / zoom;
+  ctx.setLineDash([5 / zoom, 4 / zoom]);
+  ctx.fillRect(rect.minX, rect.minY, w, h);
+  ctx.strokeRect(rect.minX, rect.minY, w, h);
+  ctx.setLineDash([]);
+  ctx.restore();
 }
 
 function drawWorldGrid(ctx: CanvasRenderingContext2D, worldW: number, worldH: number): void {
