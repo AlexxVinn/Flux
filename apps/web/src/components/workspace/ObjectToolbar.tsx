@@ -306,7 +306,7 @@ function ContextHint({ message }: { message: string }) {
     timelineHeight + WORKSPACE_PANEL_INSET_PX + AUTHORING_DOCK_BOTTOM_EXTRA_PX + 35;
   return (
     <div
-      className="pointer-events-none absolute inset-x-3 z-[9] flex justify-center max-md:bottom-[calc(var(--flux-mobile-timeline-h,52px)+var(--flux-mobile-chrome-h,56px)+env(safe-area-inset-bottom)+12px)]"
+      className="pointer-events-none absolute inset-x-3 bottom-3 z-[9] flex justify-center max-md:bottom-4"
       style={{ bottom: dockBottom }}
       role="status"
     >

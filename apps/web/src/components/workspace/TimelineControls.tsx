@@ -9,6 +9,7 @@ import {
 } from "@/store/simulationStore";
 import { useRoomSceneCollaborationStore } from "@/store/roomSceneCollaborationStore";
 import { useRoomSessionStore } from "@/store/roomSessionStore";
+import { SimulationQualityPicker } from "@/components/workspace/SimulationQualityPicker";
 
 function formatTime(ms: number): string {
   const s = ms / 1000;
@@ -203,6 +204,7 @@ function TimelineScrubRail({
   atSetup,
   scrubDisabled,
   mobile,
+  compact,
   onScrubInput,
   onScrubStart,
   onScrubEnd,
@@ -215,6 +217,8 @@ function TimelineScrubRail({
   atSetup: boolean;
   scrubDisabled: boolean;
   mobile?: boolean;
+  /** Hide time/frame row — use footer row on narrow layouts. */
+  compact?: boolean;
   onScrubInput: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onScrubStart: () => void;
   onScrubEnd: () => void;
@@ -223,6 +227,7 @@ function TimelineScrubRail({
 
   return (
     <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 px-0.5">
+      {!compact && (
       <div className="flex items-center justify-between gap-2 font-mono text-[9px] tabular-nums leading-none">
         <span
           className="rounded bg-white/[0.04] px-1.5 py-0.5 text-white/50"
@@ -236,6 +241,7 @@ function TimelineScrubRail({
           <span className="text-white/20"> / {frameTotal}</span>
         </span>
       </div>
+      )}
 
       <div className={`group relative flex w-full min-w-0 items-center ${mobile ? "h-9" : "h-6"}`}>
         <div
@@ -372,22 +378,117 @@ export function TimelineControls({ mobile = false }: { mobile?: boolean }) {
         ? "border-sky-500/25 bg-sky-500/10 text-sky-300/90"
         : "border-amber-500/20 bg-amber-500/8 text-amber-300/85";
 
+  if (mobile) {
+    return (
+      <div
+        className="flex h-full min-h-0 flex-col justify-center gap-1 bg-[#050505] px-2 py-1"
+        role="group"
+        aria-label="Timeline transport"
+      >
+        <div className="flex min-h-0 min-w-0 items-center gap-2">
+          <div className="flex shrink-0 items-center gap-px rounded-lg border border-white/[0.06] bg-black/40 p-1">
+            <TransportButton
+              label={isPlaying ? "Pause" : "Play"}
+              title={isPlaying ? "Pause (Space)" : "Play (Space)"}
+              onClick={togglePlay}
+              active={isPlaying}
+              large
+            >
+              {isPlaying ? <IconPause /> : <IconPlay />}
+            </TransportButton>
+            <TransportButton
+              label="Step backward"
+              title="Previous frame"
+              onClick={stepBackward}
+              disabled={scrubDisabled || displayIndex <= 0}
+              large
+            >
+              <IconStepBack />
+            </TransportButton>
+            <TransportButton
+              label="Step forward"
+              title="Next frame"
+              onClick={stepForward}
+              disabled={scrubDisabled}
+              large
+            >
+              <IconStepForward />
+            </TransportButton>
+            <div className="mx-0.5 h-4 w-px bg-white/[0.08]" aria-hidden />
+            <TransportButton
+              label="Jump to first frame"
+              title="Jump to frame 0"
+              onClick={resetToFirstFrame}
+              large
+            >
+              <IconToStart />
+            </TransportButton>
+            {(!atSetup || collaborative) && (
+              <TransportButton
+                label="Setup frame"
+                title={
+                  collaborative
+                    ? "Pull shared setup and go to frame 0"
+                    : "Go to setup (frame 0)"
+                }
+                onClick={onLive}
+                active={atSetup}
+                large
+              >
+                <IconSetup />
+              </TransportButton>
+            )}
+          </div>
+
+          <TimelineScrubRail
+            mobile
+            compact
+            displayIndex={displayIndex}
+            historyLength={historyLength}
+            maxIndex={maxIndex}
+            elapsedMs={elapsedMs}
+            progressPct={progressPct}
+            atSetup={atSetup}
+            scrubDisabled={scrubDisabled}
+            onScrubInput={onScrubInput}
+            onScrubStart={onScrubStart}
+            onScrubEnd={onScrubEnd}
+          />
+
+          <SpeedControl speed={speed} setSpeed={setSpeed} />
+        </div>
+
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <span className="shrink-0 font-mono text-[9px] tabular-nums text-white/45">
+            {formatTime(elapsedMs)}
+            <span className="text-white/25">
+              {" "}
+              · {displayIndex + 1}/{historyLength || 1}
+            </span>
+          </span>
+          <SimulationQualityPicker compact />
+          <span
+            className={`shrink-0 rounded border px-1.5 py-0.5 font-mono text-[9px] font-medium uppercase tracking-wider ${modeTone}`}
+          >
+            {modeLabel}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
-      className={`flex h-full min-h-0 min-w-0 flex-1 items-center bg-[#050505] py-0 ${mobile ? "gap-2 px-2" : "gap-3 px-3"}`}
+      className="flex h-full min-h-0 min-w-0 flex-1 items-center gap-3 bg-[#050505] px-3 py-0"
       role="group"
       aria-label="Timeline transport"
     >
-      {/* Transport */}
-      <div
-        className={`flex shrink-0 items-center gap-px rounded-lg border border-white/[0.06] bg-black/40 ${mobile ? "p-1" : "p-0.5"}`}
-      >
+      <div className="flex shrink-0 items-center gap-px rounded-lg border border-white/[0.06] bg-black/40 p-0.5">
         <TransportButton
           label={isPlaying ? "Pause" : "Play"}
           title={isPlaying ? "Pause (Space)" : "Play (Space)"}
           onClick={togglePlay}
           active={isPlaying}
-          large={mobile}
         >
           {isPlaying ? <IconPause /> : <IconPlay />}
         </TransportButton>
@@ -396,7 +497,6 @@ export function TimelineControls({ mobile = false }: { mobile?: boolean }) {
           title="Previous frame"
           onClick={stepBackward}
           disabled={scrubDisabled || displayIndex <= 0}
-          large={mobile}
         >
           <IconStepBack />
         </TransportButton>
@@ -405,7 +505,6 @@ export function TimelineControls({ mobile = false }: { mobile?: boolean }) {
           title="Next frame"
           onClick={stepForward}
           disabled={scrubDisabled}
-          large={mobile}
         >
           <IconStepForward />
         </TransportButton>
@@ -414,7 +513,6 @@ export function TimelineControls({ mobile = false }: { mobile?: boolean }) {
           label="Jump to first frame"
           title="Jump to frame 0"
           onClick={resetToFirstFrame}
-          large={mobile}
         >
           <IconToStart />
         </TransportButton>
@@ -428,7 +526,6 @@ export function TimelineControls({ mobile = false }: { mobile?: boolean }) {
             }
             onClick={onLive}
             active={atSetup}
-            large={mobile}
           >
             <IconSetup />
           </TransportButton>
@@ -436,7 +533,6 @@ export function TimelineControls({ mobile = false }: { mobile?: boolean }) {
       </div>
 
       <TimelineScrubRail
-        mobile={mobile}
         displayIndex={displayIndex}
         historyLength={historyLength}
         maxIndex={maxIndex}
@@ -453,7 +549,7 @@ export function TimelineControls({ mobile = false }: { mobile?: boolean }) {
         <SpeedControl speed={speed} setSpeed={setSpeed} />
 
         <span
-          className={`rounded border px-1.5 py-0.5 font-mono text-[9px] font-medium uppercase tracking-wider ${mobile ? "inline" : "hidden sm:inline"} ${modeTone}`}
+          className={`hidden rounded border px-1.5 py-0.5 font-mono text-[9px] font-medium uppercase tracking-wider sm:inline ${modeTone}`}
         >
           {modeLabel}
         </span>

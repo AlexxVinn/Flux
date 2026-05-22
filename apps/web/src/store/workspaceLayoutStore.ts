@@ -40,6 +40,10 @@ export const TIMELINE_HEIGHT_MIN = 44;
 export const TIMELINE_HEIGHT_MAX = 72;
 export const TIMELINE_HEIGHT_DEFAULT = TIMELINE_HEIGHT_MIN;
 
+/** In-flow footer on phones: timeline row + tab bar (no fixed overlap). */
+export const MOBILE_TIMELINE_HEIGHT = 88;
+export const MOBILE_TAB_BAR_HEIGHT = 52;
+
 /** Matches canvas dock inset (`left-3` / `bottom-3`). */
 export const WORKSPACE_PANEL_INSET_PX = 12;
 

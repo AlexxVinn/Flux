@@ -31,7 +31,7 @@ import {
 } from "@/lib/collaboration/remoteSceneSync";
 import { normalizeStoredScene } from "@/lib/scene/storedScene";
 import type { BodyShape, SimBodySnapshot } from "@/lib/physics/types";
-import type { SimulationQualityMode } from "@/store/simulationStore";
+import { SimulationQualityPicker } from "@/components/workspace/SimulationQualityPicker";
 
 /** Blend toward authoritative body pose each RAF while High quality playback runs (display-only smoothing). */
 const PLAYBACK_RENDER_BLEND = 0.58;
@@ -64,66 +64,12 @@ function smoothedBodiesForPlayback(
 }
 
 function SimulationQualityHud() {
-  const simQuality = useSimulationStore((s) => s.simQuality);
-  const setSimulationQuality = useSimulationStore((s) => s.setSimulationQuality);
-
-  const setMode = (mode: SimulationQualityMode) =>
-    mode !== simQuality && setSimulationQuality(mode);
-
   return (
     <div
-      role="radiogroup"
-      aria-label="Simulation quality"
-      className="pointer-events-auto absolute left-3 top-3 z-20 rounded-lg border border-white/[0.08] bg-black/58 px-2 py-1.5 shadow-lg backdrop-blur-sm max-md:left-auto max-md:right-2 max-md:top-2 max-md:scale-90 max-md:origin-top-right"
+      className="pointer-events-auto absolute left-3 top-3 z-20 hidden md:block"
       onPointerDown={(e) => e.stopPropagation()}
     >
-      <div className="mb-1 font-mono text-[9px] font-medium uppercase tracking-wide text-white/36">
-        Quality
-      </div>
-      <div className="flex gap-px rounded-md bg-white/[0.05] p-px">
-        <button
-          type="button"
-          role="radio"
-          aria-checked={simQuality === "standard"}
-          title="Balanced solver — lighter CPU usage."
-          onClick={() => setMode("standard")}
-          className={`rounded-[5px] px-2 py-1 font-mono text-[10px] font-medium outline-none ring-white/35 transition focus-visible:ring-2 ${
-            simQuality === "standard"
-              ? "bg-white/[0.12] text-white/92"
-              : "text-white/45 hover:bg-white/[0.05] hover:text-white/72"
-          }`}
-        >
-          Standard
-        </button>
-        <button
-          type="button"
-          role="radio"
-          aria-checked={simQuality === "high"}
-          title="Tighter collision solver, 2× substeps, display smoothing while playing."
-          onClick={() => setMode("high")}
-          className={`rounded-[5px] px-2 py-1 font-mono text-[10px] font-medium outline-none ring-white/35 transition focus-visible:ring-2 ${
-            simQuality === "high"
-              ? "bg-emerald-500/18 text-emerald-100"
-              : "text-white/45 hover:bg-white/[0.05] hover:text-white/72"
-          }`}
-        >
-          High
-        </button>
-        <button
-          type="button"
-          role="radio"
-          aria-checked={simQuality === "max"}
-          title="Max realism: 120 Hz fixed physics, 4× substeps, tighter contacts, interpolated render (velocity + pose)."
-          onClick={() => setMode("max")}
-          className={`rounded-[5px] px-2 py-1 font-mono text-[10px] font-medium outline-none ring-white/35 transition focus-visible:ring-2 ${
-            simQuality === "max"
-              ? "bg-violet-500/22 text-violet-100"
-              : "text-white/45 hover:bg-white/[0.05] hover:text-white/72"
-          }`}
-        >
-          Max
-        </button>
-      </div>
+      <SimulationQualityPicker />
     </div>
   );
 }
