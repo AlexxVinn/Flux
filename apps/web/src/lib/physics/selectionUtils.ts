@@ -1,5 +1,6 @@
 import { attachWorldFromLocal, worldToLocal } from "./bodyAttachPoint";
 import { ropePolylineFromSnapshot } from "./ropeGeometry";
+import { markupIntersectsRect, pickMarkupAt } from "./sceneMarkups";
 import type { SimBodySnapshot, SimulationSnapshot } from "./types";
 import { COLLISION_FRAME_WALL_THICKNESS } from "./physicsConstants";
 
@@ -103,6 +104,9 @@ export function pickEntityAt(
   const bodyHit = pickBodyAt(snapshot, worldX, worldY);
   if (bodyHit) return bodyHit;
 
+  const markupHit = pickMarkupAt(snapshot, worldX, worldY, zoom);
+  if (markupHit) return markupHit;
+
   return pickConstraintLinesAt(snapshot, worldX, worldY, tolSq);
 }
 
@@ -114,7 +118,7 @@ export interface WorldRect {
 }
 
 export function isDraggableBody(b: SimBodySnapshot): boolean {
-  if (!b.visible) return false;
+  if (!b.visible || b.locked) return false;
   if (b.entityKind === "wall" || b.entityKind === "floor" || b.entityKind === "ropeSegment") {
     return false;
   }
@@ -195,6 +199,9 @@ export function collectSelectableIds(snapshot: SimulationSnapshot): string[] {
   for (const r of snapshot.ropes ?? []) {
     if (r.visible) ids.push(r.id);
   }
+  for (const m of snapshot.markups ?? []) {
+    if (m.visible) ids.push(m.id);
+  }
   return ids;
 }
 
@@ -205,7 +212,7 @@ export function idsInMarqueeRect(snapshot: SimulationSnapshot, rect: WorldRect):
   const found = new Set<string>();
 
   for (const b of snapshot.bodies) {
-    if (!b.visible || b.entityKind === "ropeSegment") continue;
+    if (!b.visible || b.locked || b.entityKind === "ropeSegment") continue;
     const rim = b.entityKind === "collisionBounds" ? COLLISION_FRAME_WALL_THICKNESS : 0;
     const hw = b.width / 2 + rim;
     const hh = b.height / 2 + rim;
@@ -220,7 +227,7 @@ export function idsInMarqueeRect(snapshot: SimulationSnapshot, rect: WorldRect):
   }
 
   for (const sp of snapshot.springs) {
-    if (!sp.visible) continue;
+    if (!sp.visible || sp.locked) continue;
     const a = snapshot.bodies.find((b) => b.id === sp.bodyA);
     const b = snapshot.bodies.find((b) => b.id === sp.bodyB);
     if (!a?.visible || !b?.visible) continue;
@@ -230,7 +237,7 @@ export function idsInMarqueeRect(snapshot: SimulationSnapshot, rect: WorldRect):
   }
 
   for (const rope of snapshot.ropes ?? []) {
-    if (!rope.visible) continue;
+    if (!rope.visible || rope.locked) continue;
     const a = snapshot.bodies.find((b) => b.id === rope.bodyA);
     const b = snapshot.bodies.find((b) => b.id === rope.bodyB);
     if (!a?.visible || !b?.visible) continue;
@@ -246,6 +253,11 @@ export function idsInMarqueeRect(snapshot: SimulationSnapshot, rect: WorldRect):
       }
     }
     if (hit) found.add(rope.id);
+  }
+
+  for (const markup of snapshot.markups ?? []) {
+    if (!markup.visible || markup.locked) continue;
+    if (markupIntersectsRect(markup, rect)) found.add(markup.id);
   }
 
   return collectSelectableIds(snapshot).filter((id) => found.has(id));

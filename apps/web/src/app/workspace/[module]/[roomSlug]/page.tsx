@@ -7,21 +7,25 @@ import { RoomHeader } from "@/components/room/RoomHeader";
 import { useRoomSessionStore } from "@/store/roomSessionStore";
 import { membershipMatchesRoute, resolveWorkspaceMembership } from "@/lib/rooms/session";
 import {
-  activateRoomSession,
+  enterRoomSession,
   isSessionCurrent,
-  syncRoomSession,
 } from "@/lib/rooms/roomSessionRuntime";
 import {
   buildWorkspacePath,
   readBenchFromSearch,
+  type TestLayoutId,
 } from "@/lib/physics/testLayouts";
 import { useAuthStore } from "@/store/authStore";
 
-function WorkspaceRoomContent({ routeKey }: { routeKey: string }) {
+function WorkspaceRoomContent({
+  sessionRouteKey,
+  benchId,
+}: {
+  sessionRouteKey: string;
+  benchId: TestLayoutId | null;
+}) {
   const params = useParams<{ module: string; roomSlug: string }>();
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const benchId = readBenchFromSearch(searchParams.toString());
   const membership = useRoomSessionStore((s) => s.membership);
   const user = useAuthStore((s) => s.user);
   const [ready, setReady] = useState(false);
@@ -47,13 +51,10 @@ function WorkspaceRoomContent({ routeKey }: { routeKey: string }) {
           return;
         }
 
-        const generation = await activateRoomSession(resolved, { anonymous: !user });
-        if (runId !== runIdRef.current || !isSessionCurrent(generation, resolved.roomId)) {
-          return;
-        }
-
-        const synced = await syncRoomSession(resolved.roomId, generation);
-        if (runId !== runIdRef.current || !isSessionCurrent(generation, resolved.roomId)) {
+        const { generation, synced } = await enterRoomSession(resolved, { anonymous: !user });
+        if (runId !== runIdRef.current) return;
+        if (!isSessionCurrent(generation, resolved.roomId)) {
+          setEnterError("Could not attach to the room session. Please try joining again.");
           return;
         }
 
@@ -74,7 +75,7 @@ function WorkspaceRoomContent({ routeKey }: { routeKey: string }) {
     return () => {
       runIdRef.current += 1;
     };
-  }, [routeKey, mod, slug, router, benchId, user]);
+  }, [sessionRouteKey, mod, slug, router, user]);
 
   if (enterError) {
     return (
@@ -114,12 +115,18 @@ function WorkspaceRoomGate() {
   const searchParams = useSearchParams();
   const benchId = readBenchFromSearch(searchParams.toString());
 
-  const routeKey = useMemo(
-    () => `${params.module}:${params.roomSlug}:${benchId ?? ""}`,
-    [params.module, params.roomSlug, benchId],
+  const sessionRouteKey = useMemo(
+    () => `${params.module}:${params.roomSlug}`,
+    [params.module, params.roomSlug],
   );
 
-  return <WorkspaceRoomContent key={routeKey} routeKey={routeKey} />;
+  return (
+    <WorkspaceRoomContent
+      key={sessionRouteKey}
+      sessionRouteKey={sessionRouteKey}
+      benchId={benchId}
+    />
+  );
 }
 
 export default function WorkspaceRoomPage() {

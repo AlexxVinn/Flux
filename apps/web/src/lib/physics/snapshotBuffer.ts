@@ -204,4 +204,29 @@ export class SnapshotBuffer {
     this.frames.length = index + 1;
     this.rebuildLastCompact();
   }
+
+  /**
+   * World-space center positions per body from frame 0 through `endIndex` (inclusive).
+   * Used for timeline-scrubbed trajectory overlays.
+   */
+  buildTrajectoriesForBodies(
+    bodyIds: readonly string[],
+    endIndex: number,
+  ): Map<string, { x: number; y: number }[]> {
+    const out = new Map<string, { x: number; y: number }[]>();
+    if (bodyIds.length === 0 || this.frames.length === 0) return out;
+
+    const end = Math.max(0, Math.min(endIndex, this.frames.length - 1));
+    const idSet = new Set(bodyIds);
+    for (const id of bodyIds) out.set(id, []);
+
+    for (let i = 0; i <= end; i++) {
+      const compact = this.reconstructAt(i);
+      for (const b of compact) {
+        if (!idSet.has(b.id)) continue;
+        out.get(b.id)!.push({ x: b.x, y: b.y });
+      }
+    }
+    return out;
+  }
 }

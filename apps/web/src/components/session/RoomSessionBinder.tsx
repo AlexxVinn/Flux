@@ -2,11 +2,13 @@
 
 import { useEffect, useRef } from "react";
 import { usePathname } from "next/navigation";
-import { leaveRoomSession } from "@/lib/rooms/roomSessionRuntime";
+import { abandonRoomSession } from "@/lib/rooms/roomSessionRuntime";
+import { useCollaborationStore } from "@/store/collaborationStore";
+import { useRoomSessionStore } from "@/store/roomSessionStore";
 
 /**
  * When navigation leaves the workspace for home, tear down the live room session.
- * Avoids stale collab channels / membership blocking the next bench or join.
+ * Explicit Exit buttons also call abandon; this covers browser back and other exits.
  */
 export function RoomSessionBinder() {
   const pathname = usePathname();
@@ -18,7 +20,12 @@ export function RoomSessionBinder() {
     const isHome = pathname === "/";
 
     if (wasWorkspace && isHome) {
-      void leaveRoomSession();
+      const hasSession =
+        useRoomSessionStore.getState().membership !== null ||
+        useCollaborationStore.getState().supabaseConnected;
+      if (hasSession) {
+        void abandonRoomSession();
+      }
     }
 
     prevPath.current = pathname;

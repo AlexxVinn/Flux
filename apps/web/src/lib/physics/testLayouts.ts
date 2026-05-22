@@ -1,5 +1,6 @@
 import type { SimBodySnapshot, SimulationSnapshot, SpringSnapshot } from "./types";
 import {
+  inferElasticKnFromMatterConstraintStiffness,
   DEFAULT_SPRING_DAMPING,
   DEFAULT_SPRING_STIFFNESS,
   LINK_SPRING_DAMPING,
@@ -111,6 +112,7 @@ function spring(
     displayName: `Spring-${id.split("_").pop() ?? id}`,
     bodyA,
     bodyB,
+    elasticConstantNnPerM: inferElasticKnFromMatterConstraintStiffness(stiffness),
     stiffness,
     damping,
     length,
@@ -502,8 +504,8 @@ export function buildSoftBodyMesh(w: number, h: number): SimulationSnapshot {
 
   const nx = 10;
   const ny = 10;
-  const cell = 104;
-  const nodeR = cell * 0.17;
+  const cell = 40;
+  const nodeR = cell * 0.12;
   const cx = w * 0.5;
   const cy = h * 0.44;
   const topY = cy - ((ny - 1) / 2) * cell;
@@ -519,19 +521,19 @@ export function buildSoftBodyMesh(w: number, h: number): SimulationSnapshot {
       nodeSerial += 1;
       bodies.push(
         circle(nodeId(i, j), `Node-${nodeSerial}`, x, y, nodeR, {
-          mass: 0.52,
+          mass: 0.09,
           restitution: 0.22,
           friction: 0.18,
           frictionStatic: 0.22,
-          frictionAir: 0.004,
+          frictionAir: 0.007,
         }),
       );
     }
   }
 
-  const kMesh = DEFAULT_SPRING_STIFFNESS * 0.52;
+  const kMesh = DEFAULT_SPRING_STIFFNESS * 2.52;
   const dMesh = DEFAULT_SPRING_DAMPING * 1.12;
-  const kHang = DEFAULT_SPRING_STIFFNESS * 0.75;
+  const kHang = DEFAULT_SPRING_STIFFNESS * 6.75;
   let sid = 0;
 
   const pushSpring = (a: string, b: string, stiffness: number, damping: number, length: number) => {
@@ -571,7 +573,7 @@ export function buildSoftBodyMesh(w: number, h: number): SimulationSnapshot {
 
   const corner = bodies.find((b) => b.id === nodeId(nx - 1, ny - 1));
   if (corner) {
-    corner.velocityX = 38;
+    corner.velocityX = 7;
     corner.velocityY = 6;
     corner.angularVelocity = 0.08;
   }
@@ -758,8 +760,11 @@ export function getTestLayout(id: string): TestLayout | undefined {
 /** Query param on workspace URLs — survives React Strict Mode remounts (unlike sessionStorage). */
 export const BENCH_QUERY_PARAM = "bench";
 
+import type { RoomMembership } from "@flux/shared";
+
 export const PENDING_JOIN_CODE_KEY = "flux_pending_join_code";
 export const PENDING_JOIN_ANONYMOUS_KEY = "flux_pending_join_anonymous";
+export const PENDING_JOIN_MEMBERSHIP_KEY = "flux_pending_join_membership";
 
 export function buildWorkspacePath(
   module: string,
@@ -777,12 +782,10 @@ export function readBenchFromSearch(search: string): TestLayoutId | null {
   return id as TestLayoutId;
 }
 
-/** Survives navigation + persist rehydration so the workspace can re-join the room. */
-export function stashPendingRoomJoin(
-  membership: { joinCode: string },
-  anonymous: boolean,
-): void {
+/** Survives navigation so the workspace gate can attach without a second join RPC. */
+export function stashPendingRoomJoin(membership: RoomMembership, anonymous: boolean): void {
   sessionStorage.setItem(PENDING_JOIN_CODE_KEY, membership.joinCode);
+  sessionStorage.setItem(PENDING_JOIN_MEMBERSHIP_KEY, JSON.stringify(membership));
   if (anonymous) {
     sessionStorage.setItem(PENDING_JOIN_ANONYMOUS_KEY, "1");
   } else {
@@ -790,7 +793,22 @@ export function stashPendingRoomJoin(
   }
 }
 
+export function readPendingRoomMembership(): RoomMembership | null {
+  const raw = sessionStorage.getItem(PENDING_JOIN_MEMBERSHIP_KEY);
+  if (!raw) return null;
+  try {
+    const m = JSON.parse(raw) as RoomMembership;
+    if (m?.roomId && m?.slug && m?.module && m?.joinCode && m?.memberId) {
+      return m;
+    }
+  } catch {
+    /* invalid cache */
+  }
+  return null;
+}
+
 export function clearPendingRoomJoin(): void {
   sessionStorage.removeItem(PENDING_JOIN_CODE_KEY);
   sessionStorage.removeItem(PENDING_JOIN_ANONYMOUS_KEY);
+  sessionStorage.removeItem(PENDING_JOIN_MEMBERSHIP_KEY);
 }

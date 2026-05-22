@@ -3,8 +3,14 @@
 import { useState, useRef, useEffect } from "react";
 import { useSimulationStore } from "@/store/simulationStore";
 import type { LayerEntity } from "@/lib/physics/types";
+import { layerEntityLocked } from "@/lib/physics/entityLock";
 
 function entityIcon(entity: LayerEntity): string {
+  if (entity.type === "markup") {
+    if (entity.data.kind === "text") return "T";
+    if (entity.data.kind === "measure") return "↔";
+    return "→";
+  }
   if (entity.type === "spring") return "⌇";
   if (entity.type === "rope") return "⎯";
   const k = entity.data.entityKind;
@@ -79,16 +85,12 @@ function LayerRow({
       }}
       onMouseEnter={() => onHover(true)}
       onMouseLeave={() => onHover(false)}
-      className={`group flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${
-        selected
-          ? "bg-white/12 text-flux-text ring-1 ring-white/20"
-          : hovered
-            ? "bg-white/6 text-flux-text"
-            : "text-flux-muted hover:bg-white/4 hover:text-flux-text"
-      } ${!visible ? "opacity-45" : ""}`}
+      className={`inspector-list-item group w-full ${
+        selected ? "inspector-list-item--selected" : ""
+      } ${hovered && !selected ? "bg-white/[0.03]" : ""} ${!visible ? "inspector-list-item--dim" : ""}`}
     >
-      <span className="w-3 shrink-0 text-center text-[10px] text-flux-muted">
-        {entityIcon(entity)}
+      <span className="w-3 shrink-0 text-center text-[10px] text-white/28" title={layerEntityLocked(entity) ? "Locked" : undefined}>
+        {layerEntityLocked(entity) ? "🔒" : entityIcon(entity)}
       </span>
       {editing ? (
         <input
@@ -108,7 +110,7 @@ function LayerRow({
           className="min-w-0 flex-1 rounded border border-flux-focus bg-flux-bg px-1 py-0 font-mono text-[10px] text-flux-text outline-none"
         />
       ) : (
-        <span className="min-w-0 flex-1 truncate font-mono">{entityName(entity)}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[10px]">{entityName(entity)}</span>
       )}
       <button
         type="button"
@@ -117,7 +119,7 @@ function LayerRow({
           e.stopPropagation();
           onToggleVisible();
         }}
-        className="shrink-0 rounded p-0.5 text-[10px] text-flux-muted opacity-0 hover:bg-white/10 hover:text-flux-text group-hover:opacity-100"
+        className="shrink-0 rounded p-0.5 text-[10px] text-white/30 opacity-0 transition hover:text-white/55 group-hover:opacity-100"
         aria-label={visible ? `Hide ${id}` : `Show ${id}`}
       >
         {visible ? "◉" : "◎"}
@@ -139,23 +141,15 @@ export function LayersPanel({ bare = false }: { bare?: boolean }) {
   const selectedSet = new Set(selectedIds);
 
   return (
-    <section className={bare ? "flex min-h-0 flex-col" : "flex min-h-0 flex-col border-b border-flux-border"}>
-      {!bare && (
-        <div className="flex items-center justify-between px-2 py-1.5">
-          <h3 className="text-[9px] font-semibold uppercase tracking-widest text-flux-muted">
-            Layers
-          </h3>
-          <span className="font-mono text-[9px] text-flux-muted">{layers.length}</span>
-        </div>
-      )}
-      <div
-        className={`flux-scroll overflow-y-auto px-1 pb-2 ${bare ? "max-h-52" : "max-h-44"}`}
-        onClick={(e) => {
-          if (e.target === e.currentTarget) clearSelection();
-        }}
-      >
+    <div
+      className={`flex min-h-0 flex-col ${bare ? "min-h-[120px] flex-1" : ""}`}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) clearSelection();
+      }}
+    >
+      <div className={`inspector-list flux-scroll min-h-0 flex-1 overflow-y-auto ${bare ? "pb-2" : ""}`}>
         {layers.length === 0 ? (
-          <p className="px-2 py-2 text-[10px] text-flux-muted">No entities</p>
+          <p className="inspector-muted px-3 py-4">No entities</p>
         ) : (
           layers.map((entity) => {
             const id = entityId(entity);
@@ -181,6 +175,6 @@ export function LayersPanel({ bare = false }: { bare?: boolean }) {
           })
         )}
       </div>
-    </section>
+    </div>
   );
 }

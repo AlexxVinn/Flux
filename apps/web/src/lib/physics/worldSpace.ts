@@ -1,7 +1,8 @@
 import type { SimulationSnapshot } from "./types";
 import { COLLISION_FRAME_WALL_THICKNESS } from "./physicsConstants";
 
-/** Fixed authoring space: physics + persisted scene coords live in this rectangle (pixels / world units). */
+/** Fixed authoring space: physics + persisted scene coords live in this rectangle (pixels / world units).
+ *  SI display: see {@link METERS_PER_PIXEL} in `./units.ts` (100 px = 1 m). */
 
 export const FLUX_WORLD = {
   WIDTH: 3000,

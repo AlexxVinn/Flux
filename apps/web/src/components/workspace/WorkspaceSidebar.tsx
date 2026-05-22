@@ -11,7 +11,7 @@ import { useCollaborationStore } from "@/store/collaborationStore";
 import { useRoomSceneCollaborationStore } from "@/store/roomSceneCollaborationStore";
 import { useSimulationStore, isAtSharedSetupFrame } from "@/store/simulationStore";
 import { ResizeHandle } from "./layout/ResizeHandle";
-import { leaveRoomSession } from "@/lib/rooms/roomSessionRuntime";
+import { abandonRoomSession } from "@/lib/rooms/roomSessionRuntime";
 
 const MODULES = [
   {
@@ -37,14 +37,22 @@ function SectionLabel({ children }: { children: ReactNode }) {
 interface WorkspaceSidebarProps {
   roomId: string;
   benchId: string | null;
+  /** Full-width drawer on mobile; docked rail on desktop. */
+  variant?: "docked" | "drawer";
 }
 
-export function WorkspaceSidebar({ roomId, benchId }: WorkspaceSidebarProps) {
+export function WorkspaceSidebar({
+  roomId,
+  benchId,
+  variant = "docked",
+}: WorkspaceSidebarProps) {
+  const isDrawer = variant === "drawer";
   const pathname = usePathname();
   const router = useRouter();
   const membership = useRoomSessionStore((s) => s.membership);
   const sidebarWidth = useWorkspaceLayoutStore((s) => s.sidebarWidth);
   const sidebarCollapsed = useWorkspaceLayoutStore((s) => s.sidebarCollapsed);
+  const showExpanded = isDrawer || !sidebarCollapsed;
   const adjustSidebarWidth = useWorkspaceLayoutStore((s) => s.adjustSidebarWidth);
   const toggleSidebarCollapsed = useWorkspaceLayoutStore((s) => s.toggleSidebarCollapsed);
 
@@ -118,8 +126,12 @@ export function WorkspaceSidebar({ roomId, benchId }: WorkspaceSidebarProps) {
 
   return (
       <aside
-        style={{ width: sidebarWidth }}
-        className="relative flex shrink-0 flex-col border-r border-[var(--flux-border)] bg-black"
+        style={isDrawer ? undefined : { width: sidebarWidth }}
+        className={
+          isDrawer
+            ? "relative flex h-full min-h-0 w-full flex-col bg-black"
+            : "relative hidden h-full min-h-0 shrink-0 flex-col border-r border-[var(--flux-border)] bg-black md:flex"
+        }
         aria-label="Workspace navigation"
       >
         <div className="flux-panel-header flex items-center gap-2 px-3 py-3">
@@ -130,25 +142,27 @@ export function WorkspaceSidebar({ roomId, benchId }: WorkspaceSidebarProps) {
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[var(--flux-border)] bg-black text-base font-semibold text-white">
               φ
             </span>
-            {!sidebarCollapsed && (
+            {showExpanded && (
               <span className="truncate text-sm font-semibold tracking-tight text-white">
                 Flux
               </span>
             )}
           </Link>
-          <button
-            type="button"
-            onClick={toggleSidebarCollapsed}
-            className="flux-btn flex h-8 w-8 shrink-0 items-center justify-center text-xs text-white/45"
-            title={sidebarCollapsed ? "Expand sidebar ([)" : "Collapse sidebar ([)"}
-            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            aria-expanded={!sidebarCollapsed}
-          >
-            {sidebarCollapsed ? "»" : "«"}
-          </button>
+          {!isDrawer && (
+            <button
+              type="button"
+              onClick={toggleSidebarCollapsed}
+              className="flux-btn flex h-8 w-8 shrink-0 items-center justify-center text-xs text-white/45"
+              title={sidebarCollapsed ? "Expand sidebar ([)" : "Collapse sidebar ([)"}
+              aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              aria-expanded={!sidebarCollapsed}
+            >
+              {sidebarCollapsed ? "»" : "«"}
+            </button>
+          )}
         </div>
 
-        {!sidebarCollapsed && membership && (
+        {showExpanded && membership && (
           <div className="mx-3 space-y-3 border-b border-[var(--flux-border)] pb-3">
             <div>
               <div className="rounded-lg border border-[var(--flux-border)] bg-black px-2.5 py-2">
@@ -250,7 +264,7 @@ export function WorkspaceSidebar({ roomId, benchId }: WorkspaceSidebarProps) {
         )}
 
         <nav className="flux-scroll flex-1 space-y-1 overflow-y-auto p-2 pt-3" aria-label="Labs">
-          {!sidebarCollapsed && <SectionLabel>Curriculum</SectionLabel>}
+          {showExpanded && <SectionLabel>Curriculum</SectionLabel>}
           {MODULES.map((mod) => {
             const active = !mod.locked && inMechanics && mod.id === "mechanics";
             const effectiveHref = mod.id === "mechanics" && !mod.locked ? mechanicsHref : null;
@@ -316,7 +330,7 @@ export function WorkspaceSidebar({ roomId, benchId }: WorkspaceSidebarProps) {
             type="button"
             title="All rooms"
             onClick={() => {
-              void leaveRoomSession().then(() => router.push("/"));
+              void abandonRoomSession().then(() => router.push("/"));
             }}
             className={`flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-[11px] text-white/45 transition hover:bg-white/[0.04] hover:text-white/80 ${
               sidebarCollapsed ? "justify-center" : ""
@@ -333,7 +347,7 @@ export function WorkspaceSidebar({ roomId, benchId }: WorkspaceSidebarProps) {
             </p>
           )}
         </div>
-        {!sidebarCollapsed && (
+        {!isDrawer && !sidebarCollapsed && (
           <ResizeHandle
             overlay
             axis="column"

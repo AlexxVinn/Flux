@@ -239,6 +239,18 @@ export const useCollaborationStore = create<CollaborationState>((set, get) => ({
 
     if (useRoomSessionStore.getState().membership?.roomId !== targetRoomId) return;
 
+    if (sessionGeneration > 0) {
+      // Every workspace activation gets fresh Realtime listeners (rejoin after exit).
+      get().disconnect();
+      syncCollaborationIdentity(set, get);
+      await new Promise<void>((r) => window.setTimeout(r, 100));
+    } else if (get().supabaseConnected && get().roomDbId === targetRoomId) {
+      get().sendPresence({});
+      return;
+    }
+
+    if (useRoomSessionStore.getState().membership?.roomId !== targetRoomId) return;
+
     const connectedRoomId = get().roomDbId;
     if (get().supabaseConnected && connectedRoomId !== targetRoomId) {
       get().disconnect();
@@ -249,16 +261,8 @@ export const useCollaborationStore = create<CollaborationState>((set, get) => ({
     if (useRoomSessionStore.getState().membership?.roomId !== targetRoomId) return;
 
     if (get().supabaseConnected && connectedRoomId === targetRoomId) {
-      if (sessionGeneration > 0) {
-        teardownSupabaseCollaboration();
-        stopRoomPresence();
-        roomDbId = null;
-        set({ supabaseConnected: false, roomDbId: null });
-        await new Promise<void>((r) => window.setTimeout(r, 120));
-      } else {
-        get().sendPresence({});
-        return;
-      }
+      get().sendPresence({});
+      return;
     }
 
     if (useRoomSessionStore.getState().membership?.roomId !== targetRoomId) return;

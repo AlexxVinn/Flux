@@ -4,11 +4,15 @@ const COUNTERS: Record<string, number> = {
   box: 0,
   circle: 0,
   spring: 0,
+  bar: 0,
   rope: 0,
   floor: 0,
   wall: 0,
   body: 0,
   collisionBounds: 0,
+  arrow: 0,
+  text: 0,
+  measure: 0,
 };
 
 const PREFIX: Record<string, string> = {
@@ -19,13 +23,24 @@ const PREFIX: Record<string, string> = {
   wall: "Wall",
   body: "Body",
   collisionBounds: "CollisionBox",
+  arrow: "Arrow",
+  text: "Text",
+  measure: "Ruler",
 };
 
 export function resetNameCounters(): void {
   for (const k of Object.keys(COUNTERS)) COUNTERS[k] = 0;
 }
 
-export function nextEntityName(kind: EntityKind | "box" | "circle" | "rope"): string {
+export function nextMarkupName(kind: "arrow" | "text" | "measure"): string {
+  const n = (COUNTERS[kind] ?? 0) + 1;
+  COUNTERS[kind] = n;
+  return `${PREFIX[kind]}-${n}`;
+}
+
+export function nextEntityName(
+  kind: EntityKind | "box" | "circle" | "rope" | "bar" | "arrow" | "text" | "measure",
+): string {
   const key =
     kind === "rectangle"
       ? "box"
@@ -35,7 +50,9 @@ export function nextEntityName(kind: EntityKind | "box" | "circle" | "rope"): st
           ? "rope"
           : kind === "collisionBounds"
             ? "collisionBounds"
-            : kind;
+            : kind === "arrow" || kind === "text" || kind === "measure"
+              ? kind
+              : kind;
   const n = (COUNTERS[key] ?? 0) + 1;
   COUNTERS[key] = n;
   const prefix = PREFIX[key] ?? "Object";

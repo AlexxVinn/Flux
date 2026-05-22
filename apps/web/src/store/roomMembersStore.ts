@@ -14,7 +14,8 @@ import { useAuthStore } from "@/store/authStore";
 import { useCollaborationStore } from "@/store/collaborationStore";
 import { useRoomSessionStore } from "@/store/roomSessionStore";
 
-const POLL_MS = 8_000;
+/** Fallback when Realtime member events are missed; primary path is the channel subscription. */
+const POLL_MS = 60_000;
 const PEER_RELOAD_DEBOUNCE_MS = 600;
 
 interface RoomMembersState {
@@ -74,9 +75,14 @@ function refreshPresenceOnly() {
   useRoomMembersStore.setState(enrichRaw(raw));
 }
 
-async function loadMembers(roomId: string) {
+async function loadMembers(roomId: string, opts?: { silent?: boolean }) {
   const prevTotal = useRoomMembersStore.getState().totalCount;
-  useRoomMembersStore.setState({ loading: true, error: null, roomId });
+  const silent = opts?.silent ?? false;
+  useRoomMembersStore.setState({
+    ...(silent ? {} : { loading: true }),
+    error: null,
+    roomId,
+  });
   try {
     const rows = await fetchRoomMembers(roomId);
     setRawMembers(rows.map(mapRoomMemberRow));
@@ -130,7 +136,7 @@ function beginSync(roomId: string) {
 
   void loadMembers(roomId);
 
-  pollTimer = setInterval(() => void loadMembers(roomId), POLL_MS);
+  pollTimer = setInterval(() => void loadMembers(roomId, { silent: true }), POLL_MS);
 
   unsubRealtime = subscribeRoomMembers(roomId, () => {
     void loadMembers(roomId);

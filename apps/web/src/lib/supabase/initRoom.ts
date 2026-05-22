@@ -20,6 +20,7 @@ import { mpLog, mpRecordDuplicateDropped, mpRecordTransportInbound } from "@/lib
 
 let unsubscribe: (() => void) | null = null;
 let sceneDebounce: ReturnType<typeof setTimeout> | null = null;
+let pendingRemoteSeq = 0;
 let activeCollabRoomId: string | null = null;
 let storedHandlers: Parameters<typeof subscribeRoomRealtime>[1] | null = null;
 let reconnectTimer: number | null = null;
@@ -54,11 +55,20 @@ function shouldHydrateFromRoomRowRealtime(payload: {
   return nextSceneRev !== collab.sceneRevision;
 }
 
-function scheduleCollaborativeSceneSync(): void {
+function scheduleCollaborativeSceneSync(triggerSeq?: number): void {
+  if (triggerSeq !== undefined) {
+    pendingRemoteSeq = Math.max(pendingRemoteSeq, triggerSeq);
+  }
   if (sceneDebounce) clearTimeout(sceneDebounce);
   sceneDebounce = setTimeout(() => {
     sceneDebounce = null;
-    void pullAndApplyRemoteScene({ refitCamera: false });
+    const seq = pendingRemoteSeq;
+    pendingRemoteSeq = 0;
+    void pullAndApplyRemoteScene({ refitCamera: false }).then((applied) => {
+      if (applied && seq > 0) {
+        useRoomSceneCollaborationStore.getState().markRemoteSeqProcessed(seq);
+      }
+    });
   }, 80);
 }
 
@@ -121,6 +131,7 @@ function handleChannelStatus(roomId: string, status: string, err?: Error): void 
     clearRealtimeReconnect();
     useMultiplayerConnectionStore.getState().setSupabaseRealtimePhase("connected");
     useMultiplayerConnectionStore.getState().setRealtimeReconnectAttempt(0);
+    void pullAndApplyRemoteScene({ refitCamera: false });
     return;
   }
 
@@ -161,8 +172,7 @@ function buildSceneHandlers(
         mpRecordDuplicateDropped(MultiplayerEventKind.SCENE_OP);
         return;
       }
-      useRoomSceneCollaborationStore.getState().markRemoteSeqProcessed(row.seq);
-      scheduleCollaborativeSceneSync();
+      scheduleCollaborativeSceneSync(row.seq);
     },
     onRoomRowUpdate: (payload) => {
       mpRecordTransportInbound(MultiplayerEventKind.ROOM_METADATA, {
@@ -263,6 +273,7 @@ export function teardownSupabaseCollaboration(): void {
   unsubscribe = null;
   if (sceneDebounce) clearTimeout(sceneDebounce);
   sceneDebounce = null;
+  pendingRemoteSeq = 0;
   setCachedRoomId(null);
   useMultiplayerConnectionStore.getState().setSupabaseRealtimePhase("disconnected");
   if (roomId) void removeRoomRealtimeChannel(roomId);

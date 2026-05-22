@@ -121,31 +121,20 @@ export function ScrubNumField({
   };
 
   return (
-    <div
-      className={`group grid grid-cols-[auto_1fr] items-center gap-1.5 rounded-lg border px-1.5 py-1 transition-colors ${
-        readOnly
-          ? "border-transparent bg-black/25 text-flux-muted"
-          : "border-[var(--flux-border)] bg-black hover:border-[var(--flux-border-hover)] focus-within:border-[var(--flux-border-active)] focus-within:bg-black"
-      }`}
-      data-locked={readOnly || undefined}
-    >
+    <div className="inspector-row" data-locked={readOnly || undefined}>
       <button
         type="button"
         disabled={readOnly}
         onPointerDown={onLabelPointerDown}
-        className={`min-w-[1.75rem] select-none rounded px-1 py-0.5 text-left font-mono text-[10px] font-semibold uppercase tracking-wide ${
-          readOnly
-            ? "cursor-default text-flux-muted/70"
-            : "cursor-ew-resize text-white/70 hover:bg-white/5 active:bg-white/10"
-        }`}
-        title={readOnly ? undefined : `Drag to adjust ${label}`}
+        className="inspector-label"
+        title={readOnly ? undefined : `Drag to scrub · ${label}`}
         aria-controls={inputId}
       >
         {label}
       </button>
-      <div className="flex min-w-0 items-baseline gap-1">
+      <div className="inspector-field">
         {readOnly ? (
-          <span className="w-full truncate font-mono text-[11px] tabular-nums text-flux-muted/90">
+          <span className="inspector-value-readonly w-full truncate">
             {formatDisplay(value, decimals)}
           </span>
         ) : (
@@ -173,12 +162,10 @@ export function ScrubNumField({
                 (e.target as HTMLInputElement).blur();
               }
             }}
-            className="w-full min-w-0 bg-transparent font-mono text-[11px] tabular-nums text-flux-text outline-none"
+            className="inspector-value"
           />
         )}
-        {unit && (
-          <span className="shrink-0 text-[9px] text-flux-muted/80">{unit}</span>
-        )}
+        {unit && <span className="inspector-unit">{unit}</span>}
       </div>
     </div>
   );

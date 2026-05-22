@@ -21,6 +21,7 @@ export interface UserScene {
   module: string;
   createdAt: string;
   updatedAt: string;
+  isPublic?: boolean;
 }
 
 export interface RoomSummary {

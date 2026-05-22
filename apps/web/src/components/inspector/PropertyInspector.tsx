@@ -1,63 +1,69 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { useSimulationStore, usePrimarySelection, isAtSharedSetupFrame } from "@/store/simulationStore";
 import { useCanWriteInRoom, useRoomSessionStore } from "@/store/roomSessionStore";
 import { useRoomSceneCollaborationStore } from "@/store/roomSceneCollaborationStore";
 import { ScrubNumField } from "./ScrubNumField";
 import type { RopeSnapshot, SimBodySnapshot, SpringSnapshot } from "@/lib/physics/types";
 import { FLUX_WORLD } from "@/lib/physics/worldSpace";
-
-function Toggle({
-  label,
-  checked,
-  locked,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  locked?: boolean;
-  onChange: () => void;
-}) {
-  return (
-    <label
-      className={`flex items-center justify-between gap-2 text-[11px] ${
-        locked ? "cursor-default opacity-50" : "cursor-pointer"
-      }`}
-    >
-      <span className="text-flux-muted">{label}</span>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        disabled={locked}
-        onClick={() => !locked && onChange()}
-        className={`relative h-4 w-7 shrink-0 rounded-full transition ${
-          checked ? "bg-flux-text" : "bg-flux-elevated"
-        } disabled:opacity-40`}
-      >
-        <span
-          className={`absolute top-0.5 h-3 w-3 rounded-full bg-white transition ${
-            checked ? "left-3.5" : "left-0.5"
-          }`}
-        />
-      </button>
-    </label>
-  );
-}
+import {
+  SPRING_ELASTIC_MAX_N_PER_M,
+  SPRING_ELASTIC_MIN_N_PER_M,
+  isRigidBarSpring,
+} from "@/lib/physics/springDefaults";
+import {
+  UNIT_SCALE_LABEL,
+  pxToM,
+  mToPx,
+  pxPerSecToMPerSec,
+  mPerSecToPxPerSec,
+  matterMassToKg,
+  kgToMatterMass,
+  matterDensityToKgM2,
+  kgM2ToMatterDensity,
+  kineticEnergyJ,
+  formatSpeedMs,
+} from "@/lib/physics/units";
+import { collectBodyForceInspectNn } from "@/lib/physics/forceInspect";
+import { markupDistanceM } from "@/lib/physics/sceneMarkups";
+import { AppliedForcePanel } from "./AppliedForcePanel";
+import { BodyFreeBodyDiagram } from "./BodyFreeBodyDiagram";
+import { SimulationTelemetryCharts } from "./SimulationTelemetryCharts";
+import { useRightPanelStore } from "@/store/rightPanelStore";
+import {
+  InspectorAlert,
+  InspectorEmpty,
+  InspectorForceList,
+  InspectorHeader,
+  InspectorHint,
+  InspectorLinkList,
+  InspectorRoot,
+  InspectorScroll,
+  InspectorSection,
+  InspectorSegmented,
+  InspectorStatBlock,
+  InspectorToggle,
+} from "./inspector-ui";
 
 export function PropertyInspector() {
   const primaryId = usePrimarySelection();
+  const simTick = useSimulationStore((s) => s.snapshot.tick);
   const snapshot = useSimulationStore((s) => s.snapshot);
   const selectedIds = useSimulationStore((s) => s.selectedIds);
   const isPlaying = useSimulationStore((s) => s.isPlaying);
   const historyIndex = useSimulationStore((s) => s.historyIndex);
   const historyLength = useSimulationStore((s) => s.historyLength);
+  const elapsedMs = useSimulationStore((s) => s.elapsedMs);
   const gravityEnabled = useSimulationStore((s) => s.gravityEnabled);
   const toggleGravity = useSimulationStore((s) => s.toggleGravity);
   const updateBody = useSimulationStore((s) => s.updateBody);
+  const setBodyShowTrajectory = useSimulationStore((s) => s.setBodyShowTrajectory);
   const updateSpring = useSimulationStore((s) => s.updateSpring);
   const updateRope = useSimulationStore((s) => s.updateRope);
+  const activeTool = useSimulationStore((s) => s.activeTool);
+  const inspectorTab = useRightPanelStore((s) => s.propertiesInspectorTab);
+  const setInspectorTab = useRightPanelStore((s) => s.setPropertiesInspectorTab);
   const canWrite = useCanWriteInRoom();
   const roomSceneRoomId = useRoomSceneCollaborationStore((s) => s.roomId);
   const membership = useRoomSessionStore((s) => s.membership);
@@ -71,9 +77,30 @@ export function PropertyInspector() {
     !canWrite ||
     (collaborative && !atSharedSetup);
 
+  const forceInspectRows = useMemo(() => {
+    const selBody = snapshot.bodies.find(
+      (b) => b.id === primaryId && b.entityKind !== "ropeSegment",
+    );
+    if (!selBody?.visible) return [];
+    const st = useSimulationStore.getState();
+    return collectBodyForceInspectNn(snapshot, selBody.id, {
+      gravityForBody: (id) => st.getGravityForce(id),
+      appliedNn: st.getUserSustainedForcesNewtons(),
+      contacts: st.getCollisions(),
+      draftNn:
+        st.activeTool === "force" && st.selectedIds[0] === selBody.id
+          ? { fx: st.forceFxN, fy: st.forceFyN }
+          : undefined,
+    });
+  }, [snapshot, primaryId, simTick, historyIndex]);
+
   const body = snapshot.bodies.find((b) => b.id === primaryId && b.entityKind !== "ropeSegment");
   const spring = snapshot.springs.find((s) => s.id === primaryId);
   const rope = (snapshot.ropes ?? []).find((r) => r.id === primaryId);
+  const markup = (snapshot.markups ?? []).find((m) => m.id === primaryId);
+  const updateSceneMarkup = useSimulationStore((s) => s.updateSceneMarkup);
+  const setMeasureUnit = useSimulationStore((s) => s.setMeasureUnit);
+  const setEntityLocked = useSimulationStore((s) => s.setEntityLocked);
 
   const preview = useCallback(
     (patch: Partial<SimBodySnapshot>) => {
@@ -92,7 +119,11 @@ export function PropertyInspector() {
   );
 
   const previewSpring = useCallback(
-    (patch: Partial<Pick<SpringSnapshot, "stiffness" | "damping" | "length">>) => {
+    (
+      patch: Partial<
+        Pick<SpringSnapshot, "stiffness" | "damping" | "length" | "elasticConstantNnPerM">
+      >,
+    ) => {
       if (!primaryId || locked) return;
       updateSpring(primaryId, patch, { commit: false });
     },
@@ -101,7 +132,9 @@ export function PropertyInspector() {
 
   const commitSpring = useCallback(
     (
-      patch: Partial<Pick<SpringSnapshot, "stiffness" | "damping" | "length">>,
+      patch: Partial<
+        Pick<SpringSnapshot, "stiffness" | "damping" | "length" | "elasticConstantNnPerM">
+      >,
       summary: string,
     ) => {
       if (!primaryId || locked) return;
@@ -129,18 +162,83 @@ export function PropertyInspector() {
     [primaryId, locked, updateRope],
   );
 
+  if (activeTool === "measure") {
+    return (
+      <InspectorEmpty
+        icon="↔"
+        title="Tape Measure"
+        description="Readout and units are on the canvas dock at bottom-left. Drag to measure; press 9 to exit."
+      />
+    );
+  }
+
   if (!primaryId) {
     return (
-      <div className="flex flex-col items-center justify-center gap-2 px-4 py-8 text-center">
-        <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-dashed border-flux-border bg-flux-elevated/50 text-lg text-flux-muted">
-          ◇
-        </div>
-        <p className="text-xs font-medium text-flux-text">No selection</p>
-        <p className="max-w-[220px] text-[11px] leading-relaxed text-flux-muted">
-          Click to select. Drag empty space to box-select. Shift adds to selection;
-          Ctrl removes. Drag selected bodies to move them together.
-        </p>
-      </div>
+      <InspectorEmpty
+        title="No selection"
+        description="Click to select. Drag empty space to box-select. Shift adds; Ctrl removes. Drag selected bodies to move them together."
+      />
+    );
+  }
+
+  if (markup) {
+    const kindLabel =
+      markup.kind === "arrow" ? "Arrow" : markup.kind === "text" ? "Text label" : "Ruler";
+    const distM = markup.kind !== "text" ? markupDistanceM(markup) : 0;
+    const unit = markup.measureUnit ?? "m";
+
+    return (
+      <InspectorRoot locked={locked}>
+        <InspectorHeader title={markup.displayName} subtitle={kindLabel} />
+        <InspectorSection title="Markup" defaultOpen>
+          <InspectorToggle
+            label="Locked"
+            checked={!!markup.locked}
+            locked={locked}
+            onChange={() => setEntityLocked(markup.id, !markup.locked)}
+          />
+          {markup.kind === "text" ? (
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] uppercase tracking-wide text-flux-muted">Text</span>
+              <input
+                type="text"
+                className="inspector-input w-full"
+                defaultValue={markup.text ?? "Note"}
+                disabled={locked}
+                onBlur={(e) => {
+                  const t = e.target.value.trim() || "Note";
+                  updateSceneMarkup(markup.id, { text: t });
+                }}
+              />
+            </label>
+          ) : null}
+          {markup.kind === "measure" ? (
+            <>
+              <InspectorStatBlock>
+                <p>
+                  Length{" "}
+                  {unit === "cm" ? `${(distM * 100).toFixed(1)} cm` : `${distM.toFixed(2)} m`}
+                </p>
+              </InspectorStatBlock>
+              <InspectorSegmented
+                ariaLabel="Ruler units"
+                value={unit}
+                onChange={(id) => {
+                  setMeasureUnit(id as "m" | "cm");
+                  updateSceneMarkup(markup.id, { measureUnit: id as "m" | "cm" });
+                }}
+                items={[
+                  { id: "m", label: "m" },
+                  { id: "cm", label: "cm" },
+                ]}
+              />
+            </>
+          ) : null}
+          {markup.kind === "arrow" ? (
+            <InspectorHint>Drag endpoints on canvas to reposition. Delete with Backspace.</InspectorHint>
+          ) : null}
+        </InspectorSection>
+      </InspectorRoot>
     );
   }
 
@@ -149,29 +247,30 @@ export function PropertyInspector() {
     const b = snapshot.bodies.find((b) => b.id === rope.bodyB);
 
     return (
-      <div
-        className={`flex flex-col gap-3 px-2 py-2 transition-opacity ${
-          locked ? "opacity-[0.52]" : ""
-        }`}
-      >
-        <div>
-          <p className="font-mono text-xs font-medium text-flux-text">{rope.displayName}</p>
-          <p className="text-[10px] text-flux-muted">Rope · {rope.segmentCount} links</p>
-          <div className="mt-2 rounded-md border border-flux-border/60 bg-black/25 px-2 py-1.5 font-mono text-[10px] text-flux-muted">
-            <p>A → {a?.displayName ?? rope.bodyA}</p>
-            <p>B → {b?.displayName ?? rope.bodyB}</p>
-          </div>
+      <InspectorRoot locked={locked}>
+        <InspectorHeader
+          title={rope.displayName}
+          subtitle={`Rope · ${rope.segmentCount} links`}
+        >
+          <InspectorLinkList
+            items={[
+              { label: "A →", value: a?.displayName ?? rope.bodyA },
+              { label: "B →", value: b?.displayName ?? rope.bodyB },
+            ]}
+          />
           {isPlaying && (
-            <p className="mt-2 rounded-md border border-flux-border/60 bg-black/30 px-2 py-1.5 text-[10px] leading-snug text-flux-muted">
-              Simulation running — values are read-only. Pause to edit.
-            </p>
+            <InspectorAlert variant="info">
+              Simulation running — pause to edit constraint values.
+            </InspectorAlert>
           )}
-        </div>
-
-        <fieldset className="flex flex-col gap-1.5" disabled={locked}>
-          <legend className="mb-0.5 text-[8px] font-semibold uppercase tracking-widest text-flux-muted">
-            Rope
-          </legend>
+        </InspectorHeader>
+        <InspectorSection title="Rope" defaultOpen>
+          <InspectorToggle
+            label="Locked"
+            checked={!!rope.locked}
+            locked={locked}
+            onChange={() => setEntityLocked(rope.id, !rope.locked)}
+          />
           <ScrubNumField
             label="Link stiffness"
             value={rope.linkStiffness}
@@ -198,80 +297,105 @@ export function PropertyInspector() {
               commitRope({ linkDamping }, `Set ${rope.displayName} link damping`)
             }
           />
-        </fieldset>
-      </div>
+        </InspectorSection>
+      </InspectorRoot>
     );
   }
 
   if (spring && !body) {
     const sa = snapshot.bodies.find((b) => b.id === spring.bodyA);
     const sb = snapshot.bodies.find((b) => b.id === spring.bodyB);
+    const rigidBar = isRigidBarSpring(spring);
 
     return (
-      <div
-        className={`flex flex-col gap-3 px-2 py-2 transition-opacity ${
-          locked ? "opacity-[0.52]" : ""
-        }`}
-      >
-        <div>
-          <p className="font-mono text-xs font-medium text-flux-text">{spring.displayName}</p>
-          <p className="text-[10px] text-flux-muted">Spring constraint</p>
-          <div className="mt-2 rounded-md border border-flux-border/60 bg-black/25 px-2 py-1.5 font-mono text-[10px] text-flux-muted">
-            <p>A → {sa?.displayName ?? spring.bodyA}</p>
-            <p>B → {sb?.displayName ?? spring.bodyB}</p>
-          </div>
+      <InspectorRoot locked={locked}>
+        <InspectorHeader
+          title={spring.displayName}
+          subtitle={rigidBar ? "Rigid bar constraint" : "Spring constraint"}
+        >
+          <InspectorLinkList
+            items={[
+              { label: "A →", value: sa?.displayName ?? spring.bodyA },
+              { label: "B →", value: sb?.displayName ?? spring.bodyB },
+            ]}
+          />
           {isPlaying && (
-            <p className="mt-2 rounded-md border border-flux-border/60 bg-black/30 px-2 py-1.5 text-[10px] leading-snug text-flux-muted">
-              Simulation running — values are read-only. Pause to edit.
-            </p>
+            <InspectorAlert variant="info">
+              Simulation running — pause to edit constraint values.
+            </InspectorAlert>
           )}
-        </div>
-
-        <fieldset className="flex flex-col gap-1.5" disabled={locked}>
-          <legend className="mb-0.5 text-[8px] font-semibold uppercase tracking-widest text-flux-muted">
-            Spring
-          </legend>
-          <ScrubNumField
-            label="Stiffness"
-            value={spring.stiffness}
-            step={0.001}
-            min={0.001}
-            max={1}
-            decimals={3}
+        </InspectorHeader>
+        <InspectorSection title={rigidBar ? "Bar" : "Spring"} defaultOpen>
+          <InspectorToggle
+            label="Locked"
+            checked={!!spring.locked}
             locked={locked}
-            onPreview={(stiffness) => previewSpring({ stiffness })}
-            onCommit={(stiffness) =>
-              commitSpring({ stiffness }, `Set ${spring.displayName} stiffness`)
-            }
+            onChange={() => setEntityLocked(spring.id, !spring.locked)}
           />
-          <ScrubNumField
-            label="Damping"
-            value={spring.damping}
-            step={0.001}
-            min={0}
-            max={1}
-            decimals={3}
-            locked={locked}
-            onPreview={(damping) => previewSpring({ damping })}
-            onCommit={(damping) =>
-              commitSpring({ damping }, `Set ${spring.displayName} damping`)
-            }
-          />
+          {!rigidBar && (
+            <>
+              <ScrubNumField
+                label="Elastic k"
+                unit="N/m"
+                value={spring.elasticConstantNnPerM}
+                step={5}
+                decimals={0}
+                min={SPRING_ELASTIC_MIN_N_PER_M}
+                max={SPRING_ELASTIC_MAX_N_PER_M}
+                locked={locked}
+                onPreview={(elasticConstantNnPerM) =>
+                  previewSpring({ elasticConstantNnPerM })
+                }
+                onCommit={(elasticConstantNnPerM) =>
+                  commitSpring({ elasticConstantNnPerM }, `Set ${spring.displayName} elastic k`)
+                }
+              />
+              <InspectorHint>
+                |F| ≈ k·|ΔL| vs rest length. Matter stiffness is solver tuning from k unless overridden.
+              </InspectorHint>
+              <ScrubNumField
+                label="Stiffness"
+                value={spring.stiffness}
+                step={0.001}
+                min={0.001}
+                max={1}
+                decimals={3}
+                locked={locked}
+                onPreview={(stiffness) => previewSpring({ stiffness })}
+                onCommit={(stiffness) =>
+                  commitSpring({ stiffness }, `Set ${spring.displayName} stiffness`)
+                }
+              />
+              <ScrubNumField
+                label="Damping"
+                value={spring.damping}
+                step={0.001}
+                min={0}
+                max={1}
+                decimals={3}
+                locked={locked}
+                onPreview={(damping) => previewSpring({ damping })}
+                onCommit={(damping) =>
+                  commitSpring({ damping }, `Set ${spring.displayName} damping`)
+                }
+              />
+            </>
+          )}
           <ScrubNumField
             label="Length"
-            unit="px"
-            value={spring.length}
-            step={1}
-            decimals={0}
-            min={20}
+            unit="m"
+            value={pxToM(spring.length)}
+            step={0.05}
+            decimals={2}
+            min={pxToM(20)}
             locked={locked}
-            onPreview={(length) => previewSpring({ length })}
-            onCommit={(length) =>
-              commitSpring({ length }, `Set ${spring.displayName} rest length`)
+            onPreview={(lengthM) => previewSpring({ length: mToPx(lengthM) })}
+            onCommit={(lengthM) =>
+              commitSpring({ length: mToPx(lengthM) }, `Set ${spring.displayName} rest length`)
             }
           />
-        </fieldset>
-      </div>
+        </InspectorSection>
+      </InspectorRoot>
     );
   }
 
@@ -285,311 +409,401 @@ export function PropertyInspector() {
     (body.shape === "circle" || body.shape === "rectangle");
   const radius = body.width / 2;
   const isCollisionFrame = body.entityKind === "collisionBounds";
+  const showGraphsTab = !isCollisionFrame && !body.isStatic;
+  /** Graphs tab stays bright while playing so traces stay readable under read-only inspector state. */
+  const detailsDimmed = locked && (!showGraphsTab || inspectorTab === "details");
+  const inspectHeaderMuted = locked && (!showGraphsTab || inspectorTab === "details");
 
   return (
-    <div
-      className={`flex flex-col gap-3 px-2 py-2 transition-opacity ${
-        locked ? "opacity-[0.52]" : ""
-      }`}
-    >
-      <div>
-        <p className="font-mono text-xs font-medium text-flux-text">{body.displayName}</p>
-        <p className="text-[10px] capitalize text-flux-muted">
-          {isCollisionFrame ? "Collision frame · inner play area" : body.entityKind}
-          {multi ? ` · +${selectedIds.length - 1} selected` : ""}
-        </p>
-        {isCollisionFrame && (
-          <p className="mt-2 rounded-md border border-flux-border/60 bg-black/30 px-2 py-1.5 text-[10px] leading-snug text-flux-muted">
-            Replaces the world edge walls with this rim while active. Delete the frame to restore
-            full {FLUX_WORLD.WIDTH}×{FLUX_WORLD.HEIGHT} bounds.
-          </p>
-        )}
-        {isPlaying && (
-          <p className="mt-2 rounded-md border border-flux-border/60 bg-black/30 px-2 py-1.5 text-[10px] leading-snug text-flux-muted">
-            Simulation running — values are read-only. Pause to edit.
-          </p>
-        )}
-        {!canWrite && !isPlaying && (
-          <p className="mt-2 text-[10px] text-amber-400/80">Spectator view — read only.</p>
-        )}
+    <InspectorRoot locked={locked} className="min-h-0 flex-1">
+      <div className={inspectHeaderMuted ? "opacity-[0.52]" : ""}>
+        <InspectorHeader
+          title={body.displayName}
+          subtitle={`${isCollisionFrame ? "Collision frame" : body.entityKind}${multi ? ` · +${selectedIds.length - 1} selected` : ""}`}
+          badge={body.isStatic ? "Static" : undefined}
+        >
+          {isCollisionFrame && (
+            <InspectorAlert variant="info">
+              Replaces world edge walls. Delete to restore{" "}
+              {pxToM(FLUX_WORLD.WIDTH).toFixed(0)}×{pxToM(FLUX_WORLD.HEIGHT).toFixed(0)} m bounds.
+            </InspectorAlert>
+          )}
+          {isPlaying && (!showGraphsTab || inspectorTab !== "graphs") && (
+            <InspectorAlert variant="info">
+              Simulation running — values read-only. Open Graphs for live traces.
+            </InspectorAlert>
+          )}
+          {showGraphsTab && isPlaying && inspectorTab === "graphs" && (
+            <InspectorAlert variant="success">
+              Live playback — graphs follow the recorder; scrub shows frame-accurate values.
+            </InspectorAlert>
+          )}
+          {!canWrite && !isPlaying && (
+            <InspectorAlert variant="warn">Spectator view — read only.</InspectorAlert>
+          )}
+        </InspectorHeader>
       </div>
 
-      <fieldset className="flex flex-col gap-1.5" disabled={locked}>
-        <legend className="mb-0.5 text-[8px] font-semibold uppercase tracking-widest text-flux-muted">
-          Transform
-        </legend>
-        <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-          <ScrubNumField
-            label="X"
-            unit="px"
-            value={body.x}
-            step={1}
-            decimals={0}
-            locked={locked}
-            onPreview={(x) => preview({ x, y: body.y })}
-            onCommit={(x) => commit({ x, y: body.y }, `Set ${body.displayName} position X`)}
-          />
-          <ScrubNumField
-            label="Y"
-            unit="px"
-            value={body.y}
-            step={1}
-            decimals={0}
-            locked={locked}
-            onPreview={(y) => preview({ x: body.x, y })}
-            onCommit={(y) => commit({ x: body.x, y }, `Set ${body.displayName} position Y`)}
-          />
-        </div>
-        {!isCollisionFrame && (
-          <ScrubNumField
-            label="Angle"
-            unit="rad"
-            value={body.angle}
-            step={0.01}
-            locked={locked}
-            onPreview={(angle) => preview({ angle })}
-            onCommit={(angle) => commit({ angle }, `Set ${body.displayName} angle`)}
-          />
-        )}
-      </fieldset>
+      {showGraphsTab ? (
+        <InspectorSegmented
+          ariaLabel="Property inspector tabs"
+          value={inspectorTab}
+          onChange={(id) => setInspectorTab(id as "details" | "graphs")}
+          liveId="graphs"
+          items={[
+            { id: "details", label: "Inspect" },
+            { id: "graphs", label: "Graphs", live: isPlaying },
+          ]}
+        />
+      ) : null}
 
-      {canResizeShape && (
-        <fieldset className="flex flex-col gap-1.5" disabled={locked}>
-          <legend className="mb-0.5 text-[8px] font-semibold uppercase tracking-widest text-flux-muted">
-            Size
-          </legend>
-          {body.shape === "circle" ? (
-            <ScrubNumField
-              label="Radius"
-              unit="px"
-              value={radius}
-              step={1}
-              decimals={0}
-              min={4}
-              locked={locked}
-              onPreview={(r) => {
-                const d = r * 2;
-                preview({ width: d, height: d });
-              }}
-              onCommit={(r) => {
-                const d = r * 2;
-                commit(
-                  { width: d, height: d },
-                  `Set ${body.displayName} radius`,
-                );
-              }}
+      <InspectorScroll>
+        <div className={detailsDimmed ? "opacity-[0.52]" : ""}>
+        {showGraphsTab && inspectorTab === "graphs" ? (
+          <div className="pb-1">
+            <SimulationTelemetryCharts
+              bodyId={body.id}
+              bodyMassMatter={body.mass}
+              historyLength={historyLength}
+              historyIndex={historyIndex}
+              elapsedMsReview={elapsedMs}
+              simTick={simTick}
+              isPlaying={isPlaying}
+              playbackHighlight
             />
-          ) : (
-            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-              <ScrubNumField
-                label="Width"
-                unit="px"
-                value={body.width}
-                step={1}
-                decimals={0}
-                min={isCollisionFrame ? 64 : 8}
-                locked={locked}
-                onPreview={(width) => preview({ width, height: body.height })}
-                onCommit={(width) =>
-                  commit(
-                    { width, height: body.height },
-                    `Set ${body.displayName} width`,
-                  )
-                }
-              />
-              <ScrubNumField
-                label="Height"
-                unit="px"
-                value={body.height}
-                step={1}
-                decimals={0}
-                min={isCollisionFrame ? 64 : 8}
-                locked={locked}
-                onPreview={(height) => preview({ width: body.width, height })}
-                onCommit={(height) =>
-                  commit(
-                    { width: body.width, height },
-                    `Set ${body.displayName} height`,
-                  )
-                }
-              />
-            </div>
-          )}
-        </fieldset>
-      )}
-
-      {!body.isStatic && (
-        <>
-          <fieldset className="flex flex-col gap-1.5" disabled={locked}>
-            <legend className="mb-0.5 text-[8px] font-semibold uppercase tracking-widest text-flux-muted">
-              Motion
-            </legend>
-            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-              <ScrubNumField
-                label="Vx"
-                unit="m/s"
-                value={body.velocityX}
-                step={0.5}
-                {...fieldProps}
-                onPreview={(velocityX) => preview({ velocityX })}
-                onCommit={(velocityX) =>
-                  commit({ velocityX }, `Set ${body.displayName} velocity X`)
-                }
-              />
-              <ScrubNumField
-                label="Vy"
-                unit="m/s"
-                value={body.velocityY}
-                step={0.5}
-                {...fieldProps}
-                onPreview={(velocityY) => preview({ velocityY })}
-                onCommit={(velocityY) =>
-                  commit({ velocityY }, `Set ${body.displayName} velocity Y`)
-                }
-              />
-            </div>
-            <ScrubNumField
-              label="ω"
-              unit="rad/s"
-              value={body.angularVelocity}
-              step={0.05}
-              {...fieldProps}
-              onPreview={(angularVelocity) => preview({ angularVelocity })}
-              onCommit={(angularVelocity) =>
-                commit({ angularVelocity }, `Set ${body.displayName} angular velocity`)
-              }
-            />
-          </fieldset>
-
-          <fieldset className="flex flex-col gap-1.5" disabled={locked}>
-            <legend className="mb-0.5 text-[8px] font-semibold uppercase tracking-widest text-flux-muted">
-              Material
-            </legend>
-            <ScrubNumField
-              label="Mass"
-              unit="kg"
-              value={body.mass}
-              step={0.1}
-              min={0.001}
-              locked={locked}
-              onPreview={(mass) => preview({ mass })}
-              onCommit={(mass) => commit({ mass }, `Set ${body.displayName} mass`)}
-            />
-            <ScrubNumField
-              label="Density"
-              unit="kg/m²"
-              value={body.density}
-              step={0.0001}
-              min={0}
-              locked={locked}
-              onPreview={(density) => preview({ density })}
-              onCommit={(density) => commit({ density }, `Set ${body.displayName} density`)}
-            />
-            <ScrubNumField
-              label="Restitution"
-              value={body.restitution}
-              step={0.05}
-              min={0}
-              max={1}
-              locked={locked}
-              onPreview={(restitution) => preview({ restitution })}
-              onCommit={(restitution) =>
-                commit({ restitution }, `Set ${body.displayName} restitution`)
-              }
-            />
-            <ScrubNumField
-              label="Friction"
-              value={body.friction}
-              step={0.05}
-              min={0}
-              max={1}
-              locked={locked}
-              onPreview={(friction) => preview({ friction })}
-              onCommit={(friction) => commit({ friction }, `Set ${body.displayName} friction`)}
-            />
-            <ScrubNumField
-              label="Static μ"
-              value={body.frictionStatic}
-              step={0.05}
-              min={0}
-              max={1}
-              locked={locked}
-              onPreview={(frictionStatic) => preview({ frictionStatic })}
-              onCommit={(frictionStatic) =>
-                commit({ frictionStatic }, `Set ${body.displayName} static friction`)
-              }
-            />
-            <ScrubNumField
-              label="Air drag"
-              value={body.frictionAir}
-              step={0.001}
-              min={0}
-              locked={locked}
-              onPreview={(frictionAir) => preview({ frictionAir })}
-              onCommit={(frictionAir) =>
-                commit({ frictionAir }, `Set ${body.displayName} air drag`)
-              }
-            />
-            <ScrubNumField
-              label="Sleep thr."
-              value={body.sleepThreshold}
-              step={0.5}
-              min={0}
-              locked={locked}
-              onPreview={(sleepThreshold) => preview({ sleepThreshold })}
-              onCommit={(sleepThreshold) =>
-                commit({ sleepThreshold }, `Set ${body.displayName} sleep threshold`)
-              }
-            />
-          </fieldset>
-
-          <fieldset className="flex flex-col gap-1.5" disabled={locked}>
-            <legend className="mb-0.5 text-[8px] font-semibold uppercase tracking-widest text-flux-muted">
-              Forces
-            </legend>
-            <ScrubNumField
-              label="Gravity scale"
-              value={body.gravityScale}
-              step={0.1}
-              min={0}
-              max={3}
-              locked={locked || !gravityEnabled}
-              onPreview={(gravityScale) => preview({ gravityScale })}
-              onCommit={(gravityScale) =>
-                commit({ gravityScale }, `Set ${body.displayName} gravity scale`)
-              }
-            />
-            <Toggle
-              label="Global gravity"
-              checked={gravityEnabled}
-              locked={locked}
-              onChange={toggleGravity}
-            />
-          </fieldset>
-
-          <div className="rounded-md border border-flux-border bg-black/25 px-2 py-1.5 font-mono text-[10px] text-flux-muted">
-            <p>Speed {Math.hypot(body.velocityX, body.velocityY).toFixed(2)} m/s</p>
-            <p>
-              KE {(0.5 * body.mass * (body.velocityX ** 2 + body.velocityY ** 2)).toFixed(1)} J
-            </p>
-            {body.isSleeping && <p className="text-sky-400/90">Sleeping</p>}
           </div>
-        </>
-      )}
+        ) : (
+          <>
+            <InspectorSection title="Transform" defaultOpen>
+                <ScrubNumField
+                  label="X"
+                  unit="m"
+                  value={pxToM(body.x)}
+                  step={0.05}
+                  decimals={2}
+                  locked={locked}
+                  onPreview={(xM) => preview({ x: mToPx(xM), y: body.y })}
+                  onCommit={(xM) =>
+                    commit({ x: mToPx(xM), y: body.y }, `Set ${body.displayName} position X`)
+                  }
+                />
+                <ScrubNumField
+                  label="Y"
+                  unit="m"
+                  value={pxToM(body.y)}
+                  step={0.05}
+                  decimals={2}
+                  locked={locked}
+                  onPreview={(yM) => preview({ x: body.x, y: mToPx(yM) })}
+                  onCommit={(yM) =>
+                    commit({ x: body.x, y: mToPx(yM) }, `Set ${body.displayName} position Y`)
+                  }
+                />
+              {!isCollisionFrame && (
+                <ScrubNumField
+                  label="Angle"
+                  unit="rad"
+                  value={body.angle}
+                  step={0.01}
+                  locked={locked}
+                  onPreview={(angle) => preview({ angle })}
+                  onCommit={(angle) => commit({ angle }, `Set ${body.displayName} angle`)}
+                />
+              )}
+            </InspectorSection>
 
-      {!isCollisionFrame && (
-        <fieldset className="flex flex-col gap-1" disabled={locked}>
-          <legend className="mb-0.5 text-[8px] font-semibold uppercase tracking-widest text-flux-muted">
-            Flags
-          </legend>
-          <Toggle
-            label="Static"
-            checked={body.isStatic}
-            locked={locked}
-            onChange={() => commit({ isStatic: !body.isStatic }, `Set ${body.displayName} static`)}
-          />
-        </fieldset>
-      )}
-    </div>
+            {canResizeShape && (
+              <InspectorSection title="Dimensions" defaultOpen>
+                {body.shape === "circle" ? (
+                  <ScrubNumField
+                    label="Radius"
+                    unit="m"
+                    value={pxToM(radius)}
+                    step={0.05}
+                    decimals={2}
+                    min={pxToM(4)}
+                    locked={locked}
+                    onPreview={(rM) => {
+                      const d = mToPx(rM) * 2;
+                      preview({ width: d, height: d });
+                    }}
+                    onCommit={(rM) => {
+                      const d = mToPx(rM) * 2;
+                      commit({ width: d, height: d }, `Set ${body.displayName} radius`);
+                    }}
+                  />
+                ) : (
+                  <>
+                    <ScrubNumField
+                      label="Width"
+                      unit="m"
+                      value={pxToM(body.width)}
+                      step={0.05}
+                      decimals={2}
+                      min={pxToM(isCollisionFrame ? 64 : 8)}
+                      locked={locked}
+                      onPreview={(widthM) => preview({ width: mToPx(widthM), height: body.height })}
+                      onCommit={(widthM) =>
+                        commit(
+                          { width: mToPx(widthM), height: body.height },
+                          `Set ${body.displayName} width`,
+                        )
+                      }
+                    />
+                    <ScrubNumField
+                      label="Height"
+                      unit="m"
+                      value={pxToM(body.height)}
+                      step={0.05}
+                      decimals={2}
+                      min={pxToM(isCollisionFrame ? 64 : 8)}
+                      locked={locked}
+                      onPreview={(heightM) =>
+                        preview({ width: body.width, height: mToPx(heightM) })
+                      }
+                      onCommit={(heightM) =>
+                        commit(
+                          { width: body.width, height: mToPx(heightM) },
+                          `Set ${body.displayName} height`,
+                        )
+                      }
+                    />
+                  </>
+                )}
+              </InspectorSection>
+            )}
+
+            {!body.isStatic && (
+              <>
+                <InspectorSection title="Motion" defaultOpen>
+                    <ScrubNumField
+                      label="Vx"
+                      unit="m/s"
+                      value={pxPerSecToMPerSec(body.velocityX)}
+                      step={0.05}
+                      {...fieldProps}
+                      onPreview={(vxMs) => preview({ velocityX: mPerSecToPxPerSec(vxMs) })}
+                      onCommit={(vxMs) =>
+                        commit(
+                          { velocityX: mPerSecToPxPerSec(vxMs) },
+                          `Set ${body.displayName} velocity X`,
+                        )
+                      }
+                    />
+                    <ScrubNumField
+                      label="Vy"
+                      unit="m/s"
+                      value={pxPerSecToMPerSec(body.velocityY)}
+                      step={0.05}
+                      {...fieldProps}
+                      onPreview={(vyMs) => preview({ velocityY: mPerSecToPxPerSec(vyMs) })}
+                      onCommit={(vyMs) =>
+                        commit(
+                          { velocityY: mPerSecToPxPerSec(vyMs) },
+                          `Set ${body.displayName} velocity Y`,
+                        )
+                      }
+                    />
+                  <ScrubNumField
+                    label="ω"
+                    unit="rad/s"
+                    value={body.angularVelocity}
+                    step={0.05}
+                    {...fieldProps}
+                    onPreview={(angularVelocity) => preview({ angularVelocity })}
+                    onCommit={(angularVelocity) =>
+                      commit({ angularVelocity }, `Set ${body.displayName} angular velocity`)
+                    }
+                  />
+                </InspectorSection>
+
+                <InspectorSection title="Material" defaultOpen>
+                  <ScrubNumField
+                    label="Mass"
+                    unit="kg"
+                    value={matterMassToKg(body.mass)}
+                    step={0.01}
+                    min={0.001}
+                    locked={locked}
+                    onPreview={(massKg) => preview({ mass: kgToMatterMass(massKg) })}
+                    onCommit={(massKg) =>
+                      commit({ mass: kgToMatterMass(massKg) }, `Set ${body.displayName} mass`)
+                    }
+                  />
+                  <ScrubNumField
+                    label="Density"
+                    unit="kg/m²"
+                    value={matterDensityToKgM2(body.density)}
+                    step={0.01}
+                    min={0}
+                    locked={locked}
+                    onPreview={(densityKgM2) => preview({ density: kgM2ToMatterDensity(densityKgM2) })}
+                    onCommit={(densityKgM2) =>
+                      commit(
+                        { density: kgM2ToMatterDensity(densityKgM2) },
+                        `Set ${body.displayName} density`,
+                      )
+                    }
+                  />
+                  <ScrubNumField
+                    label="Restitution"
+                    value={body.restitution}
+                    step={0.05}
+                    min={0}
+                    max={1}
+                    locked={locked}
+                    onPreview={(restitution) => preview({ restitution })}
+                    onCommit={(restitution) =>
+                      commit({ restitution }, `Set ${body.displayName} restitution`)
+                    }
+                  />
+                  <ScrubNumField
+                    label="Friction"
+                    value={body.friction}
+                    step={0.05}
+                    min={0}
+                    max={1}
+                    locked={locked}
+                    onPreview={(friction) => preview({ friction })}
+                    onCommit={(friction) => commit({ friction }, `Set ${body.displayName} friction`)}
+                  />
+                  <ScrubNumField
+                    label="Static μ"
+                    value={body.frictionStatic}
+                    step={0.05}
+                    min={0}
+                    max={1}
+                    locked={locked}
+                    onPreview={(frictionStatic) => preview({ frictionStatic })}
+                    onCommit={(frictionStatic) =>
+                      commit({ frictionStatic }, `Set ${body.displayName} static friction`)
+                    }
+                  />
+                  <ScrubNumField
+                    label="Air drag"
+                    value={body.frictionAir}
+                    step={0.001}
+                    min={0}
+                    locked={locked}
+                    onPreview={(frictionAir) => preview({ frictionAir })}
+                    onCommit={(frictionAir) =>
+                      commit({ frictionAir }, `Set ${body.displayName} air drag`)
+                    }
+                  />
+                  <ScrubNumField
+                    label="Sleep thr."
+                    value={body.sleepThreshold}
+                    step={0.5}
+                    min={0}
+                    locked={locked}
+                    onPreview={(sleepThreshold) => preview({ sleepThreshold })}
+                    onCommit={(sleepThreshold) =>
+                      commit({ sleepThreshold }, `Set ${body.displayName} sleep threshold`)
+                    }
+                  />
+                </InspectorSection>
+
+                <InspectorSection title="Forces" defaultOpen>
+                  <ScrubNumField
+                    label="Gravity scale"
+                    value={body.gravityScale}
+                    step={0.1}
+                    min={0}
+                    max={3}
+                    locked={locked || !gravityEnabled}
+                    onPreview={(gravityScale) => preview({ gravityScale })}
+                    onCommit={(gravityScale) =>
+                      commit({ gravityScale }, `Set ${body.displayName} gravity scale`)
+                    }
+                  />
+                  <InspectorToggle
+                    label="Global gravity"
+                    checked={gravityEnabled}
+                    locked={locked}
+                    onChange={toggleGravity}
+                  />
+                </InspectorSection>
+
+                {forceInspectRows.length > 0 && (
+                  <InspectorSection title="Force breakdown" defaultOpen>
+                    <InspectorHint>
+                      Canvas labels show tag + magnitude; full Fx·Fy detail here while selected.
+                    </InspectorHint>
+                    <InspectorForceList rows={forceInspectRows} />
+                  </InspectorSection>
+                )}
+
+                {activeTool === "force" && (
+                  <AppliedForcePanel body={body} canApply={canWrite && !body.isStatic} />
+                )}
+
+                <InspectorStatBlock>
+                  <p>
+                    Speed{" "}
+                    {formatSpeedMs(
+                      Math.hypot(
+                        pxPerSecToMPerSec(body.velocityX),
+                        pxPerSecToMPerSec(body.velocityY),
+                      ),
+                    )}
+                  </p>
+                  <p>
+                    KE{" "}
+                    {kineticEnergyJ(
+                      matterMassToKg(body.mass),
+                      pxPerSecToMPerSec(body.velocityX),
+                      pxPerSecToMPerSec(body.velocityY),
+                    ).toFixed(2)}{" "}
+                    J
+                  </p>
+                  <p className="mt-1 opacity-70">{UNIT_SCALE_LABEL}</p>
+                  {body.isSleeping && <p className="text-sky-400/90">Sleeping</p>}
+                </InspectorStatBlock>
+              </>
+            )}
+
+            {!isCollisionFrame && (
+              <InspectorSection title="Object flags" defaultOpen>
+                <InspectorToggle
+                  label="Locked"
+                  checked={!!body.locked}
+                  locked={locked}
+                  onChange={() => setEntityLocked(body.id, !body.locked)}
+                />
+                <InspectorToggle
+                  label="Static body"
+                  checked={body.isStatic}
+                  locked={locked}
+                  onChange={() => commit({ isStatic: !body.isStatic }, `Set ${body.displayName} static`)}
+                />
+              </InspectorSection>
+            )}
+
+            {!isCollisionFrame && !body.isStatic && (
+              <InspectorSection title="Review" defaultOpen>
+                <InspectorToggle
+                  label="Show trajectory"
+                  checked={body.showTrajectory ?? false}
+                  locked={!canWrite}
+                  onChange={() =>
+                    setBodyShowTrajectory(primaryId!, !(body.showTrajectory ?? false))
+                  }
+                  description="Dashed path from frame 0 through the current timeline position."
+                />
+              </InspectorSection>
+            )}
+
+            {!isCollisionFrame && forceInspectRows.length > 0 && (
+              <InspectorSection title="Free-body diagram" defaultOpen={false}>
+                <div className="px-2 pb-2">
+                  <BodyFreeBodyDiagram body={body} rows={forceInspectRows} />
+                </div>
+              </InspectorSection>
+            )}
+          </>
+        )}
+        </div>
+      </InspectorScroll>
+    </InspectorRoot>
   );
 }

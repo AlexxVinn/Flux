@@ -9,6 +9,10 @@ import type { MemberRole, RoomMembership } from "@flux/shared";
  */
 interface RoomSessionState {
   membership: RoomMembership | null;
+  /** Bumped on every commit; stale async leave must not wipe a newer join. */
+  membershipEpoch: number;
+  /** Bumped when navigating to join + on commit; stale abandon must not wipe an in-flight join. */
+  joinIntentEpoch: number;
   /**
    * Incremented on every workspace `activateRoomSession`; drives collab store rebinding
    * so re-joining the same room always resets op sequence state.
@@ -16,14 +20,26 @@ interface RoomSessionState {
   collabBindingEpoch: number;
   setMembership: (m: RoomMembership | null) => void;
   setCollabBindingEpoch: (epoch: number) => void;
+  bumpJoinIntent: () => number;
   clear: () => void;
 }
 
-export const useRoomSessionStore = create<RoomSessionState>((set) => ({
+export const useRoomSessionStore = create<RoomSessionState>((set, get) => ({
   membership: null,
+  membershipEpoch: 0,
+  joinIntentEpoch: 0,
   collabBindingEpoch: 0,
-  setMembership: (membership) => set({ membership }),
+  setMembership: (membership) =>
+    set((s) => ({
+      membership,
+      membershipEpoch: membership ? s.membershipEpoch + 1 : s.membershipEpoch,
+    })),
   setCollabBindingEpoch: (collabBindingEpoch) => set({ collabBindingEpoch }),
+  bumpJoinIntent: () => {
+    const next = get().joinIntentEpoch + 1;
+    set({ joinIntentEpoch: next });
+    return next;
+  },
   clear: () => set({ membership: null, collabBindingEpoch: 0 }),
 }));
 

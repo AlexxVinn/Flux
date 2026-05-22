@@ -63,7 +63,7 @@ export async function fetchUserScenes(): Promise<UserScene[]> {
   const supabase = getSupabase();
   const { data, error } = await supabase
     .from("user_scenes")
-    .select("id, owner_id, title, module, created_at, updated_at")
+    .select("id, owner_id, title, module, created_at, updated_at, is_public")
     .order("updated_at", { ascending: false });
 
   if (error || !data) return [];
@@ -75,6 +75,7 @@ export async function fetchUserScenes(): Promise<UserScene[]> {
     module: row.module,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    isPublic: row.is_public ?? false,
   }));
 }
 
@@ -93,6 +94,18 @@ export async function createRoom(req: CreateRoomRequest): Promise<RoomMembership
 
   let scenePayload: unknown | null =
     req.initialScene != null && typeof req.initialScene === "object" ? req.initialScene : null;
+
+  if (!scenePayload && req.userSceneId) {
+    const { data: row } = await supabase
+      .from("user_scenes")
+      .select("snapshot")
+      .eq("id", req.userSceneId)
+      .maybeSingle();
+
+    if (row?.snapshot) {
+      scenePayload = row.snapshot;
+    }
+  }
 
   if (!scenePayload && req.catalogId) {
     const { data: row } = await supabase

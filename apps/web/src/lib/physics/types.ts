@@ -1,6 +1,17 @@
 export type BodyShape = "circle" | "rectangle";
 
-export type SpawnTool = "select" | "circle" | "rectangle" | "spring" | "rope" | "collisionBox";
+export type SpawnTool =
+  | "select"
+  | "circle"
+  | "rectangle"
+  | "spring"
+  | "rigidBar"
+  | "rope"
+  | "collisionBox"
+  | "force"
+  | "measure";
+
+export type ForceApplicationMode = "impulse" | "sustained";
 
 export type EntityKind =
   | "circle"
@@ -36,6 +47,10 @@ export interface SimBodySnapshot {
   sleepThreshold: number;
   isStatic: boolean;
   visible: boolean;
+  /** When true, excluded from marquee/group select; direct canvas/layer click still selects. */
+  locked?: boolean;
+  /** When true, canvas draws the playback path up to the current timeline review frame. */
+  showTrajectory?: boolean;
   gravityScale: number;
   isSleeping: boolean;
   width: number;
@@ -51,11 +66,14 @@ export interface SpringSnapshot {
   displayName: string;
   bodyA: string;
   bodyB: string;
+  /** Hooke’s law stiffness \(k\) used for overlays and pedagogical \|F\| ≈ \|kΔL\| (N/m). */
+  elasticConstantNnPerM: number;
   stiffness: number;
   damping: number;
   /** Rest length in px (Matter constraint length). */
   length: number;
   visible: boolean;
+  locked?: boolean;
   /** Local-space anchor on bodyA (default center). */
   anchorA?: { x: number; y: number };
   /** Local-space anchor on bodyB (default center). */
@@ -84,6 +102,7 @@ export interface RopeSnapshot {
   linkStiffness: number;
   linkDamping: number;
   visible: boolean;
+  locked?: boolean;
   anchorA?: { x: number; y: number };
   anchorB?: { x: number; y: number };
   /** World-space simulated points (endpoints + interior), updated each tick. */
@@ -91,21 +110,46 @@ export interface RopeSnapshot {
   segmentLength?: number;
 }
 
+export type SceneMarkupKind = "arrow" | "text" | "measure";
+
+/** Scene markup — arrow, label, or ruler; persisted with the simulation document. */
+export interface SceneMarkupSnapshot {
+  id: string;
+  displayName: string;
+  kind: SceneMarkupKind;
+  /** World-space points: two for arrow/ruler, one for text anchor. */
+  points: { x: number; y: number }[];
+  text?: string;
+  visible: boolean;
+  locked?: boolean;
+  /** Ruler readout unit (`measure` kind only). */
+  measureUnit?: "m" | "cm";
+}
+
 export interface SimulationSnapshot {
   bodies: SimBodySnapshot[];
   springs: SpringSnapshot[];
   ropes: RopeSnapshot[];
+  /** Authoring overlays (not simulated by Matter). */
+  markups?: SceneMarkupSnapshot[];
   tick: number;
 }
 
 export type LayerEntity =
   | { type: "body"; data: SimBodySnapshot }
   | { type: "spring"; data: SpringSnapshot }
-  | { type: "rope"; data: RopeSnapshot };
+  | { type: "rope"; data: RopeSnapshot }
+  | { type: "markup"; data: SceneMarkupSnapshot };
 
 export interface CollisionDebugPoint {
   x: number;
   y: number;
   nx: number;
   ny: number;
+  /** Flux body ids for this Matter pair (parent label for compounds). */
+  bodyA?: string;
+  bodyB?: string;
+  /** Mixed friction from Matter.Pair for this overlap. */
+  frictionMixed?: number;
+  frictionStaticMixed?: number;
 }

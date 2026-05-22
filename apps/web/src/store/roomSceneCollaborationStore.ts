@@ -9,7 +9,11 @@ import {
   type SceneOp,
 } from "@/lib/scene/storedScene";
 import { rpcApplySceneOp, rpcGetRoomScene, rpcSetPlaybackState } from "@/lib/scene/roomSceneApi";
-import { markLocalSceneRevisionApplied, resetRemoteSceneSyncState } from "@/lib/collaboration/remoteSceneSync";
+import {
+  markLocalSceneRevisionApplied,
+  resetRemoteSceneSyncState,
+  snapshotSignature,
+} from "@/lib/collaboration/remoteSceneSync";
 import { createDbId } from "@/lib/supabase/roomRepository";
 import { DEFAULT_SCENE_OBJECT_LIMIT } from "@/lib/scene/sceneLimits";
 
@@ -28,6 +32,8 @@ interface RoomSceneCollaborationState {
   lastServerSnapshot: StoredSceneSnapshot | null;
 
   ingestJoinPayload: (raw: unknown) => void;
+  /** Returns true when snapshot/revision metadata actually changed. */
+  ingestRefreshPayload: (raw: unknown) => boolean;
   setRoomContext: (roomId: string | null) => void;
   /** Idempotent: full reset when membership session or epoch changes (re-entry, same room). */
   rebindToMembershipIfStale: (membership: RoomMembership, collabBindingEpoch: number) => void;
@@ -54,7 +60,7 @@ interface RoomSceneCollaborationState {
     | { ok: true; playback_state: "paused" | "playing"; scene_revision: number; snapshot: unknown }
     | { ok: false; message: string }
   >;
-  refreshFromServer: () => Promise<boolean>;
+  refreshFromServer: () => Promise<{ ok: true; changed: boolean } | { ok: false }>;
 }
 
 export const useRoomSceneCollaborationStore = create<RoomSceneCollaborationState>((set, get) => ({
@@ -136,6 +142,45 @@ export const useRoomSceneCollaborationStore = create<RoomSceneCollaborationState
     });
   },
 
+  /** Refresh snapshot/revision from Postgres without resetting op sequence cursors. */
+  ingestRefreshPayload: (raw) => {
+    if (!raw || typeof raw !== "object") return false;
+    const d = raw as Record<string, unknown>;
+    const revRaw = d.scene_revision;
+    const sceneRevision =
+      typeof revRaw === "number" && Number.isFinite(revRaw)
+        ? revRaw
+        : typeof revRaw === "string" && revRaw !== ""
+          ? Number(revRaw)
+          : NaN;
+    if (!Number.isFinite(sceneRevision)) return false;
+    const snap = normalizeStoredScene(d.snapshot ?? {});
+    const playbackRevision =
+      typeof d.playback_revision === "number" ? d.playback_revision : 0;
+    const playbackState = d.playback_state === "playing" ? "playing" : "paused";
+    const objectLimit =
+      typeof d.object_limit === "number" ? d.object_limit : DEFAULT_SCENE_OBJECT_LIMIT;
+    const current = get();
+    if (
+      current.sceneRevision === sceneRevision &&
+      current.playbackRevision === playbackRevision &&
+      current.playbackState === playbackState &&
+      current.objectLimit === objectLimit &&
+      current.lastServerSnapshot &&
+      snapshotSignature(current.lastServerSnapshot) === snapshotSignature(snap)
+    ) {
+      return false;
+    }
+    set({
+      sceneRevision,
+      playbackRevision,
+      playbackState,
+      objectLimit,
+      lastServerSnapshot: snap,
+    });
+    return true;
+  },
+
   markPlaybackFromRpc: (state, playbackRevision, sceneRevision, snapshotRaw) => {
     const snap = normalizeStoredScene(snapshotRaw);
     set({
@@ -212,11 +257,11 @@ export const useRoomSceneCollaborationStore = create<RoomSceneCollaborationState
 
   refreshFromServer: async () => {
     const { roomId } = get();
-    if (!roomId) return false;
+    if (!roomId) return { ok: false };
     const raw = await rpcGetRoomScene(roomId);
-    if (!raw) return false;
-    get().ingestJoinPayload(raw);
-    return true;
+    if (!raw) return { ok: false };
+    const changed = get().ingestRefreshPayload(raw);
+    return { ok: true, changed };
   },
 }));
 

@@ -1,0 +1,51 @@
+/** Canvas force-vector colors — shared by renderer and the on-canvas legend HUD. */
+export const FORCE_LEGEND_ROWS = [
+  {
+    id: "weight",
+    tag: "G",
+    label: "Weight",
+    detail: "Gravitational · hover body for N",
+    color: "#a78bfa",
+    glow: "rgba(167,139,250,0.28)",
+  },
+  {
+    id: "applied",
+    tag: "F",
+    label: "Applied",
+    detail: "Sustained user force",
+    color: "#fb923c",
+    glow: "rgba(251,146,60,0.22)",
+  },
+  {
+    id: "preview",
+    tag: "F",
+    label: "Preview",
+    detail: "Impulse flash & drag ghost",
+    color: "#fbbf24",
+    glow: "rgba(251,191,36,0.2)",
+  },
+  {
+    id: "elastic",
+    tag: "Fs",
+    label: "Spring",
+    detail: "Hooke · kΔL along link",
+    color: "#2dd4bf",
+    glow: "rgba(45,212,191,0.22)",
+  },
+  {
+    id: "normal",
+    tag: "Fn",
+    label: "Normal",
+    detail: "Contact reaction (estimate)",
+    color: "#38bdf8",
+    glow: "rgba(56,189,248,0.22)",
+  },
+  {
+    id: "friction",
+    tag: "Ff",
+    label: "Friction",
+    detail: "Tangential (estimate)",
+    color: "#ea580c",
+    glow: "rgba(234,88,12,0.22)",
+  },
+] as const;

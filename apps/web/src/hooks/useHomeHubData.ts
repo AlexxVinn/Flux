@@ -7,8 +7,6 @@ import { isSupabaseConfigured } from "@/lib/supabase/env";
 import { waitForAuthReady } from "@/lib/supabase/waitForAuth";
 import { useAuthStore } from "@/store/authStore";
 
-const REFRESH_MS = 30_000;
-
 export type HomeHubLoadState = "idle" | "loading" | "ready" | "error";
 
 export function useHomeHubData() {
@@ -58,18 +56,18 @@ export function useHomeHubData() {
   }, [initialized, refresh]);
 
   useEffect(() => {
-    if (!initialized || loadState !== "ready") return;
-    const id = window.setInterval(() => void refresh(), REFRESH_MS);
-    return () => window.clearInterval(id);
-  }, [initialized, loadState, refresh]);
-
-  useEffect(() => {
     if (!initialized) return;
+    let debounce: ReturnType<typeof setTimeout> | null = null;
     const onVisible = () => {
-      if (document.visibilityState === "visible") void refresh();
+      if (document.visibilityState !== "visible") return;
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => void refresh(), 800);
     };
     document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
+    return () => {
+      if (debounce) clearTimeout(debounce);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [initialized, refresh]);
 
   return {

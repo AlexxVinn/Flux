@@ -19,6 +19,8 @@ export interface RegionLayout {
 
 export type RightPanelLayoutMode = "stack" | "single";
 
+export type PropertiesInspectorTab = "details" | "graphs";
+
 interface RightPanelState {
   width: number;
   layoutMode: RightPanelLayoutMode;
@@ -26,6 +28,9 @@ interface RightPanelState {
   regions: Record<RightPanelRegionId, RegionLayout>;
   sceneLayersOpen: boolean;
   sceneDebugOpen: boolean;
+  sceneLibraryOpen: boolean;
+  /** Body inspector: numeric fields vs rolling playback graphs. */
+  propertiesInspectorTab: PropertiesInspectorTab;
 
   setWidth: (width: number) => void;
   adjustWidth: (delta: number) => void;
@@ -41,11 +46,13 @@ interface RightPanelState {
   ) => void;
   setSceneLayersOpen: (open: boolean) => void;
   setSceneDebugOpen: (open: boolean) => void;
+  setSceneLibraryOpen: (open: boolean) => void;
+  setPropertiesInspectorTab: (tab: PropertiesInspectorTab) => void;
 }
 
-export const RIGHT_PANEL_WIDTH_MIN = 260;
-export const RIGHT_PANEL_WIDTH_MAX = 480;
-export const RIGHT_PANEL_WIDTH_DEFAULT = 340;
+export const RIGHT_PANEL_WIDTH_MIN = 280;
+export const RIGHT_PANEL_WIDTH_MAX = 520;
+export const RIGHT_PANEL_WIDTH_DEFAULT = 300;
 
 export const REGION_ORDER: RightPanelRegionId[] = [
   "scene",
@@ -56,10 +63,10 @@ export const REGION_ORDER: RightPanelRegionId[] = [
 ];
 
 const REGION_MIN: Record<RightPanelRegionId, number> = {
-  scene: 100,
-  properties: 120,
+  scene: 140,
+  properties: 140,
   members: 100,
-  activity: 64,
+  activity: 72,
   discussion: 120,
 };
 
@@ -131,6 +138,8 @@ export const useRightPanelStore = create<RightPanelState>()(
       regions: { ...DEFAULT_REGIONS },
       sceneLayersOpen: true,
       sceneDebugOpen: false,
+      sceneLibraryOpen: true,
+      propertiesInspectorTab: "details",
 
       setWidth: (width) => set({ width: clampWidth(width) }),
 
@@ -201,10 +210,12 @@ export const useRightPanelStore = create<RightPanelState>()(
 
       setSceneLayersOpen: (sceneLayersOpen) => set({ sceneLayersOpen }),
       setSceneDebugOpen: (sceneDebugOpen) => set({ sceneDebugOpen }),
+      setSceneLibraryOpen: (sceneLibraryOpen) => set({ sceneLibraryOpen }),
+      setPropertiesInspectorTab: (propertiesInspectorTab) => set({ propertiesInspectorTab }),
     }),
     {
       name: "flux_right_panel",
-      version: 2,
+      version: 4,
       migrate: (persisted, version) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         const state = persisted as Record<string, unknown>;
@@ -225,7 +236,22 @@ export const useRightPanelStore = create<RightPanelState>()(
           regions = { ...regions, members: { ...DEFAULT_REGIONS.members } };
         }
 
-        return { ...state, regions };
+        let nextState: Record<string, unknown> = { ...state, regions };
+
+        if (version < 3) {
+          nextState.propertiesTelemetryOpen =
+            typeof state.propertiesTelemetryOpen === "boolean" ? state.propertiesTelemetryOpen : true;
+        }
+
+        if (version < 4) {
+          nextState.propertiesInspectorTab =
+            state.propertiesInspectorTab === "graphs" || state.propertiesInspectorTab === "details"
+              ? (state.propertiesInspectorTab as PropertiesInspectorTab)
+              : "details";
+          delete nextState.propertiesTelemetryOpen;
+        }
+
+        return nextState;
       },
     },
   ),

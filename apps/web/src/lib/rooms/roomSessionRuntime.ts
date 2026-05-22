@@ -1,5 +1,5 @@
 import type { RoomMembership } from "@flux/shared";
-import { applyCollaborativeSceneFromStore } from "@/lib/collaboration/remoteSceneSync";
+import { reconcileEngineWithServer } from "@/lib/collaboration/remoteSceneSync";
 import { useCollaborationStore } from "@/store/collaborationStore";
 import { useRoomSceneCollaborationStore } from "@/store/roomSceneCollaborationStore";
 import { useRoomSessionStore } from "@/store/roomSessionStore";
@@ -13,9 +13,12 @@ import { startRoomSyncCoordinator, stopRoomSyncCoordinator } from "@/lib/multipl
 import { useMultiplayerConnectionStore } from "@/lib/multiplayer/connectionStore";
 import { resetMultiplayerDiagnostics } from "@/lib/multiplayer/diagnostics";
 
-/** Bumped on every leave; async work must verify before applying results. */
+/** Bumped on every leave/abandon; async work must verify before applying results. */
 let sessionGeneration = 0;
-let leaveInFlight: Promise<void> | null = null;
+let abandonInFlight: Promise<void> | null = null;
+let enterInFlight: Promise<{ generation: number; synced: boolean }> | null = null;
+
+const REALTIME_SETTLE_MS = 120;
 
 export function getSessionGeneration(): number {
   return sessionGeneration;
@@ -28,60 +31,90 @@ export function isSessionCurrent(generation: number, roomId: string): boolean {
   );
 }
 
-/**
- * Fully tear down the previous room (collab channels, scene, sim).
- * Safe to call multiple times; concurrent callers share one flight.
- */
-export async function leaveRoomSession(): Promise<void> {
-  if (leaveInFlight) {
-    await leaveInFlight;
-    return;
+function settle(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+/** True only while still inside a live workspace session (e.g. bench switch), not after exit + rejoin. */
+function isLiveRoomSession(membership: RoomMembership): boolean {
+  const session = useRoomSessionStore.getState();
+  if (!membershipMatchesRoute(session.membership, membership.module, membership.slug)) {
+    return false;
   }
+  if (session.membership?.roomId !== membership.roomId) return false;
 
-  leaveInFlight = (async () => {
-    sessionGeneration += 1;
+  const collab = useCollaborationStore.getState();
+  const scene = useRoomSceneCollaborationStore.getState();
+  return (
+    collab.supabaseConnected &&
+    collab.roomDbId === membership.roomId &&
+    scene.roomId === membership.roomId &&
+    scene.collabBindKey !== null
+  );
+}
 
-    clearPendingRoomJoin();
-    setCachedRoomId(null);
-
-    useCollaborationStore.getState().disconnect();
-    useRoomSceneCollaborationStore.getState().setRoomContext(null);
-    useSimulationStore.getState().tearDownForRoomChange();
-    resetRemoteSceneSyncState();
-    forceResetRoomMembersSync();
-    useRoomSessionStore.getState().clear();
-    stopRoomSyncCoordinator();
-    useMultiplayerConnectionStore.getState().reset();
-    resetMultiplayerDiagnostics();
-
-    // Let Supabase Realtime finish removing channels (avoids race with next subscribe).
-    await new Promise<void>((resolve) => {
-      window.setTimeout(resolve, 80);
-    });
-  })();
-
-  try {
-    await leaveInFlight;
-  } finally {
-    leaveInFlight = null;
-  }
+/** Tear down collab channels, scene sync, and sim — keep membership. */
+async function tearDownRoomRuntime(): Promise<void> {
+  useCollaborationStore.getState().disconnect();
+  useRoomSceneCollaborationStore.getState().setRoomContext(null);
+  useSimulationStore.getState().tearDownForRoomChange();
+  resetRemoteSceneSyncState();
+  forceResetRoomMembersSync();
+  stopRoomSyncCoordinator();
+  useMultiplayerConnectionStore.getState().reset();
+  resetMultiplayerDiagnostics();
+  await settle(REALTIME_SETTLE_MS);
 }
 
 /**
- * Switch to a room: leave previous session if needed, then commit membership.
- * Returns a generation token for guarding async follow-up (collab connect, scene load).
+ * Exit to home: tear down runtime and abandon membership unless a newer join intent started.
+ */
+export async function abandonRoomSession(): Promise<void> {
+  if (abandonInFlight) {
+    await abandonInFlight;
+    return;
+  }
+
+  abandonInFlight = (async () => {
+    const intentAtAbandon = useRoomSessionStore.getState().joinIntentEpoch;
+    sessionGeneration += 1;
+
+    await tearDownRoomRuntime();
+
+    if (useRoomSessionStore.getState().joinIntentEpoch === intentAtAbandon) {
+      clearPendingRoomJoin();
+      setCachedRoomId(null);
+      useRoomSessionStore.getState().clear();
+    }
+  })();
+
+  try {
+    await abandonInFlight;
+  } finally {
+    abandonInFlight = null;
+  }
+}
+
+/** @deprecated Use abandonRoomSession — kept for call-site compatibility during migration. */
+export const leaveRoomSession = abandonRoomSession;
+
+/**
+ * Commit membership, optionally recycle runtime, return a generation token for async guards.
  */
 export async function activateRoomSession(
   membership: RoomMembership,
   opts?: { anonymous?: boolean },
 ): Promise<number> {
-  const current = useRoomSessionStore.getState().membership;
-  const sameSession =
-    current?.roomId === membership.roomId &&
-    membershipMatchesRoute(current, membership.module, membership.slug);
+  if (abandonInFlight) {
+    await abandonInFlight;
+  }
 
-  if (!sameSession) {
-    await leaveRoomSession();
+  const resumeLive = isLiveRoomSession(membership);
+
+  if (!resumeLive) {
+    await tearDownRoomRuntime();
   }
 
   sessionGeneration += 1;
@@ -104,10 +137,34 @@ export async function syncRoomSession(
   await useCollaborationStore.getState().connectToRoom(roomId, generation);
   if (!isSessionCurrent(generation, roomId)) return false;
 
-  const ok = await useRoomSceneCollaborationStore.getState().refreshFromServer();
-  if (!ok || !isSessionCurrent(generation, roomId)) return ok;
+  const fetched = await useRoomSceneCollaborationStore.getState().refreshFromServer();
+  if (!fetched.ok || !isSessionCurrent(generation, roomId)) return fetched.ok;
 
-  applyCollaborativeSceneFromStore(false, true);
+  await reconcileEngineWithServer({ force: true, refitCamera: false });
   startRoomSyncCoordinator(roomId);
   return true;
+}
+
+/** Serialized resolve → activate → sync for one workspace entry. */
+export async function enterRoomSession(
+  membership: RoomMembership,
+  opts?: { anonymous?: boolean },
+): Promise<{ generation: number; synced: boolean }> {
+  if (enterInFlight) {
+    return enterInFlight;
+  }
+
+  const flight = (async (): Promise<{ generation: number; synced: boolean }> => {
+    const generation = await activateRoomSession(membership, opts);
+    const synced = await syncRoomSession(membership.roomId, generation);
+    return { generation, synced };
+  })();
+
+  enterInFlight = flight;
+
+  try {
+    return await flight;
+  } finally {
+    enterInFlight = null;
+  }
 }

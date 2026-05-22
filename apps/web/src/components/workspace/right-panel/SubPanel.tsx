@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { InspectorSection } from "@/components/inspector/inspector-ui";
 
 interface SubPanelProps {
   title: string;
@@ -9,19 +10,17 @@ interface SubPanelProps {
   children: ReactNode;
 }
 
+/** Nested collapsible block inside the Scene region (Blender-style sub-panel). */
 export function SubPanel({ title, open, onToggle, children }: SubPanelProps) {
   return (
-    <div className="border-b border-flux-border/60 last:border-b-0">
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[10px] font-medium uppercase tracking-wider text-flux-muted transition hover:bg-white/[0.03] hover:text-flux-text"
-        aria-expanded={open}
-      >
-        <span className={`text-[9px] transition ${open ? "rotate-90" : ""}`}>›</span>
-        {title}
-      </button>
-      {open && <div className="pb-2">{children}</div>}
-    </div>
+    <InspectorSection
+      title={title}
+      open={open}
+      onOpenChange={(next) => {
+        if (next !== open) onToggle();
+      }}
+    >
+      {children}
+    </InspectorSection>
   );
 }

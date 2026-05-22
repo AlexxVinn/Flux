@@ -3,10 +3,16 @@
  */
 import type {
   RopeSnapshot,
+  SceneMarkupSnapshot,
   SimBodySnapshot,
   SimulationSnapshot,
   SpringSnapshot,
 } from "@/lib/physics/types";
+import {
+  inferElasticKnFromMatterConstraintStiffness,
+  matterConstraintDampingFromElasticKn,
+  matterConstraintStiffnessFromElasticKn,
+} from "@/lib/physics/springDefaults";
 
 export const STORED_SCENE_SCHEMA_VERSION = 1;
 
@@ -19,18 +25,28 @@ export type SceneOp =
   | { type: "entity.add.body"; body: SimBodySnapshot }
   | { type: "entity.add.spring"; spring: SpringSnapshot }
   | { type: "entity.add.rope"; rope: RopeSnapshot }
+  | { type: "entity.add.markup"; markup: SceneMarkupSnapshot }
   | { type: "entity.remove"; id: string }
   | { type: "entity.patch.body"; id: string; patch: Partial<SimBodySnapshot> }
   | {
       type: "entity.patch.spring";
       id: string;
-      patch: Partial<Pick<SpringSnapshot, "stiffness" | "damping" | "length" | "visible" | "displayName">>;
+      patch: Partial<
+        Pick<SpringSnapshot, "stiffness" | "damping" | "length" | "elasticConstantNnPerM" | "visible" | "locked" | "displayName">
+      >;
     }
   | {
       type: "entity.patch.rope";
       id: string;
       patch: Partial<
-        Pick<RopeSnapshot, "linkStiffness" | "linkDamping" | "segmentCount" | "visible" | "displayName">
+        Pick<RopeSnapshot, "linkStiffness" | "linkDamping" | "segmentCount" | "visible" | "locked" | "displayName">
+      >;
+    }
+  | {
+      type: "entity.patch.markup";
+      id: string;
+      patch: Partial<
+        Pick<SceneMarkupSnapshot, "points" | "text" | "visible" | "locked" | "displayName" | "measureUnit">
       >;
     }
   | { type: "scene.gravity"; gravityEnabled: boolean }
@@ -54,6 +70,8 @@ const BODY_PATCH_KEYS = new Set([
   "frictionAir",
   "isStatic",
   "visible",
+  "locked",
+  "showTrajectory",
   "displayName",
   "label",
   "gravityScale",
@@ -65,7 +83,9 @@ const SPRING_PATCH_KEYS = new Set([
   "stiffness",
   "damping",
   "length",
+  "elasticConstantNnPerM",
   "visible",
+  "locked",
   "displayName",
 ]);
 
@@ -74,21 +94,78 @@ const ROPE_PATCH_KEYS = new Set([
   "linkDamping",
   "segmentCount",
   "visible",
+  "locked",
   "displayName",
 ]);
+
+const MARKUP_PATCH_KEYS = new Set([
+  "points",
+  "text",
+  "visible",
+  "locked",
+  "displayName",
+  "measureUnit",
+]);
+
+/** Persisted markup document for `entity.add.markup`. */
+export function sanitizeMarkupForCollab(markup: SceneMarkupSnapshot): SceneMarkupSnapshot {
+  return {
+    id: markup.id,
+    displayName: markup.displayName,
+    kind: markup.kind,
+    points: markup.points.map((p) => ({ x: p.x, y: p.y })),
+    visible: markup.visible,
+    ...(markup.text != null ? { text: markup.text } : {}),
+    ...(markup.measureUnit != null ? { measureUnit: markup.measureUnit } : {}),
+    ...(markup.locked ? { locked: true } : {}),
+  };
+}
+
+export function sanitizeMarkupPatchForCollab(
+  patch: Partial<SceneMarkupSnapshot>,
+): Partial<
+  Pick<SceneMarkupSnapshot, "points" | "text" | "visible" | "locked" | "displayName" | "measureUnit">
+> {
+  const out: Partial<
+    Pick<SceneMarkupSnapshot, "points" | "text" | "visible" | "locked" | "displayName" | "measureUnit">
+  > = {};
+  for (const k of MARKUP_PATCH_KEYS) {
+    const key = k as keyof SceneMarkupSnapshot;
+    if (key in patch && patch[key] !== undefined) {
+      (out as Record<string, unknown>)[k] = patch[key];
+    }
+  }
+  return out;
+}
 
 /** Drop engine/spring fields that must never be sent on `entity.patch.spring` (server asserts allowlist). */
 export function sanitizeSpringPatchForCollab(
   patch: Partial<SpringSnapshot>,
-): Partial<Pick<SpringSnapshot, "stiffness" | "damping" | "length" | "visible" | "displayName">> {
+): Partial<
+  Pick<
+    SpringSnapshot,
+    "stiffness" | "damping" | "length" | "elasticConstantNnPerM" | "visible" | "locked" | "displayName"
+  >
+> {
   const out: Partial<
-    Pick<SpringSnapshot, "stiffness" | "damping" | "length" | "visible" | "displayName">
+    Pick<
+      SpringSnapshot,
+      "stiffness" | "damping" | "length" | "elasticConstantNnPerM" | "visible" | "locked" | "displayName"
+    >
   > = {};
   for (const k of SPRING_PATCH_KEYS) {
     const key = k as keyof SpringSnapshot;
     if (key in patch && patch[key] !== undefined) {
       (out as Record<string, unknown>)[k] = patch[key];
     }
+  }
+  if (
+    typeof out.elasticConstantNnPerM === "number" &&
+    Number.isFinite(out.elasticConstantNnPerM)
+  ) {
+    const k = out.elasticConstantNnPerM;
+    out.stiffness = matterConstraintStiffnessFromElasticKn(k);
+    out.damping = matterConstraintDampingFromElasticKn(k, out.stiffness);
   }
   return out;
 }
@@ -112,10 +189,10 @@ export function sanitizeRopeForCollab(rope: RopeSnapshot): RopeSnapshot {
 export function sanitizeRopePatchForCollab(
   patch: Partial<RopeSnapshot>,
 ): Partial<
-  Pick<RopeSnapshot, "linkStiffness" | "linkDamping" | "segmentCount" | "visible" | "displayName">
+  Pick<RopeSnapshot, "linkStiffness" | "linkDamping" | "segmentCount" | "visible" | "locked" | "displayName">
 > {
   const out: Partial<
-    Pick<RopeSnapshot, "linkStiffness" | "linkDamping" | "segmentCount" | "visible" | "displayName">
+    Pick<RopeSnapshot, "linkStiffness" | "linkDamping" | "segmentCount" | "visible" | "locked" | "displayName">
   > = {};
   for (const k of ROPE_PATCH_KEYS) {
     const key = k as keyof RopeSnapshot;
@@ -128,11 +205,39 @@ export function sanitizeRopePatchForCollab(
 
 export function normalizeStoredScene(raw: unknown): StoredSceneSnapshot {
   const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const rawSprings = Array.isArray(o.springs) ? (o.springs as SpringSnapshot[]) : [];
+  const springs: SpringSnapshot[] = rawSprings.map((s) => ({
+    ...s,
+    elasticConstantNnPerM:
+      typeof (s as { elasticConstantNnPerM?: unknown }).elasticConstantNnPerM === "number" &&
+      Number.isFinite((s as { elasticConstantNnPerM: number }).elasticConstantNnPerM)
+        ? (s as { elasticConstantNnPerM: number }).elasticConstantNnPerM
+        : inferElasticKnFromMatterConstraintStiffness(typeof s.stiffness === "number" ? s.stiffness : 0.022),
+  }));
+  const rawMarkups = Array.isArray(o.markups) ? (o.markups as SceneMarkupSnapshot[]) : [];
+  const markups: SceneMarkupSnapshot[] = rawMarkups
+    .filter((m) => m && typeof m.id === "string" && typeof m.kind === "string")
+    .map((m) => ({
+      id: m.id,
+      displayName: typeof m.displayName === "string" ? m.displayName : m.id,
+      kind: m.kind,
+      points: Array.isArray(m.points)
+        ? m.points
+            .filter((p) => p && typeof p.x === "number" && typeof p.y === "number")
+            .map((p) => ({ x: p.x, y: p.y }))
+        : [],
+      visible: m.visible !== false,
+      locked: m.locked === true,
+      ...(typeof m.text === "string" ? { text: m.text } : {}),
+      ...(m.measureUnit === "cm" || m.measureUnit === "m" ? { measureUnit: m.measureUnit } : {}),
+    }));
+
   return {
     schemaVersion: typeof o.schemaVersion === "number" ? o.schemaVersion : STORED_SCENE_SCHEMA_VERSION,
     bodies: Array.isArray(o.bodies) ? (o.bodies as SimBodySnapshot[]) : [],
-    springs: Array.isArray(o.springs) ? (o.springs as SpringSnapshot[]) : [],
+    springs,
     ropes: Array.isArray(o.ropes) ? (o.ropes as RopeSnapshot[]) : [],
+    markups,
     tick: typeof o.tick === "number" ? o.tick : 0,
     gravityEnabled: typeof o.gravityEnabled === "boolean" ? o.gravityEnabled : true,
   };
@@ -162,6 +267,42 @@ function authoringBodiesOnly(snap: SimulationSnapshot): SimBodySnapshot[] {
       b.entityKind !== "wall" &&
       b.entityKind !== "floor" &&
       b.entityKind !== "ropeSegment",
+  );
+}
+
+/** Hash of persisted authoring content — ignores Matter-only wall/floor/rope-segment bodies. */
+export function authoringSceneSignature(
+  snap: Pick<SimulationSnapshot, "bodies" | "springs" | "ropes" | "markups">,
+): string {
+  const bodyBits = authoringBodiesOnly(snap as SimulationSnapshot)
+    .map((b) => `${b.id}:${Math.round(b.x)}:${Math.round(b.y)}`)
+    .sort()
+    .join("|");
+  const springIds = snap.springs
+    .map((s) => s.id)
+    .sort()
+    .join(",");
+  const ropeIds = (snap.ropes ?? [])
+    .map((r) => r.id)
+    .sort()
+    .join(",");
+  const markupIds = (snap.markups ?? [])
+    .map((m) => m.id)
+    .sort()
+    .join(",");
+  return `${bodyBits}#${springIds}#${ropeIds}#${markupIds}`;
+}
+
+export function localEngineMatchesStoredAuthoring(
+  simSnap: SimulationSnapshot,
+  gravityEnabled: boolean,
+  stored: StoredSceneSnapshot,
+): boolean {
+  const local = snapshotForServer(simSnap, gravityEnabled);
+  const server = normalizeStoredScene(stored);
+  return (
+    authoringSceneSignature(toSimulationSnapshot(local)) ===
+    authoringSceneSignature(toSimulationSnapshot(server))
   );
 }
 
@@ -197,6 +338,7 @@ export function authoringPhysicsSnapshotsEqual(a: SimulationSnapshot, b: Simulat
     if (Math.abs(s.stiffness - o.stiffness) > EPS) return false;
     if (Math.abs(s.damping - o.damping) > EPS) return false;
     if (Math.abs(s.length - o.length) > EPS) return false;
+    if (Math.abs(s.elasticConstantNnPerM - o.elasticConstantNnPerM) > EPS) return false;
   }
   const ar = a.ropes ?? [];
   const br = b.ropes ?? [];
@@ -217,7 +359,13 @@ export function authoringPhysicsSnapshotsEqual(a: SimulationSnapshot, b: Simulat
 /** Strip DB metadata for engine seeding — walls/floor are added by the engine. */
 export function toSimulationSnapshot(stored: StoredSceneSnapshot): SimulationSnapshot {
   const n = normalizeStoredScene(stored);
-  return { bodies: n.bodies, springs: n.springs, ropes: n.ropes, tick: n.tick };
+  return {
+    bodies: n.bodies,
+    springs: n.springs,
+    ropes: n.ropes,
+    markups: n.markups ?? [],
+    tick: n.tick,
+  };
 }
 
 function assertKeys(allowed: Set<string>, patch: Record<string, unknown>): void {
@@ -252,6 +400,12 @@ export function applySceneOpToStoredSnapshot(
         ...base,
         ropes: [...base.ropes, op.rope],
       });
+    case "entity.add.markup":
+      if (!op.markup?.id) throw new Error("invalid_op");
+      return normalizeStoredScene({
+        ...base,
+        markups: [...(base.markups ?? []), op.markup],
+      });
     case "entity.remove": {
       if (!op.id) throw new Error("invalid_op");
       const ropesAfterBody = base.ropes.filter(
@@ -262,6 +416,7 @@ export function applySceneOpToStoredSnapshot(
         bodies: base.bodies.filter((b) => b.id !== op.id),
         springs: base.springs.filter((s) => s.id !== op.id),
         ropes: ropesAfterBody,
+        markups: (base.markups ?? []).filter((m) => m.id !== op.id),
       });
     }
     case "entity.patch.body": {
@@ -291,6 +446,16 @@ export function applySceneOpToStoredSnapshot(
       next[idx] = { ...next[idx]!, ...op.patch };
       return normalizeStoredScene({ ...base, ropes: next });
     }
+    case "entity.patch.markup": {
+      const patch = op.patch as Record<string, unknown>;
+      assertKeys(MARKUP_PATCH_KEYS, patch);
+      const markups = base.markups ?? [];
+      const idx = markups.findIndex((m) => m.id === op.id);
+      if (idx < 0) throw new Error("entity_not_found");
+      const next = [...markups];
+      next[idx] = { ...next[idx]!, ...op.patch };
+      return normalizeStoredScene({ ...base, markups: next });
+    }
     case "scene.gravity":
       return normalizeStoredScene({ ...base, gravityEnabled: op.gravityEnabled });
     case "scene.replace":
@@ -312,6 +477,7 @@ export function opIsStructural(op: SceneOp): boolean {
     case "entity.add.body":
     case "entity.add.spring":
     case "entity.add.rope":
+    case "entity.add.markup":
     case "entity.remove":
     case "scene.replace":
       return true;
@@ -337,6 +503,7 @@ export function snapshotForServer(
     ),
     springs: snap.springs.map((s) => ({ ...s })),
     ropes: (snap.ropes ?? []).map((r) => ({ ...r })),
+    markups: (snap.markups ?? []).map((m) => sanitizeMarkupForCollab(m)),
     tick: 0,
     gravityEnabled,
   });

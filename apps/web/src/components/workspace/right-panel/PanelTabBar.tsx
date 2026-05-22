@@ -51,30 +51,26 @@ export function PanelTabBar({
     tooltip?.target === "layout"
       ? layoutLabel
       : tooltip
-        ? TABS.find((t) => t.id === tooltip.target)?.label ?? ""
+        ? (TABS.find((t) => t.id === tooltip.target)?.label ?? "")
         : "";
 
   return (
     <div
       ref={barRef}
-      className="flux-panel-header relative flex shrink-0 items-center justify-between gap-2 overflow-visible border-b border-white/[0.06] px-2 py-1.5"
+      className="relative flex shrink-0 items-center justify-between gap-2 border-b border-[var(--flux-inspector-border)] px-2.5 py-2"
       onMouseLeave={hideTooltip}
     >
       {tooltip && (
         <div
           role="tooltip"
-          className="pointer-events-none absolute bottom-full z-[100] mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md border border-white/12 bg-[#121214] px-2 py-1 text-[10px] font-medium text-white/90 shadow-lg"
-          style={{ left: tooltip.x }}
+          className="pointer-events-none absolute bottom-full z-[100] mb-1.5 -translate-x-1/2 whitespace-nowrap rounded px-2 py-1 font-mono text-[10px] text-white/70 shadow-md"
+          style={{ left: tooltip.x, background: "#18181c" }}
         >
           {tooltipText}
-          <span
-            className="absolute left-1/2 top-full h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rotate-45 border border-white/12 border-t-0 border-l-0 bg-[#121214]"
-            aria-hidden
-          />
         </div>
       )}
 
-      <div className="flex items-center gap-0.5">
+      <div className="flex items-center gap-1">
         {TABS.map((tab) => {
           const isActive = layoutMode === "single" && focusedRegion === tab.id;
           const badge = badgeFor?.(tab.id);
@@ -87,15 +83,11 @@ export function PanelTabBar({
               onFocus={(e) => showTooltip(e.currentTarget, tab.id)}
               aria-label={tab.label}
               aria-current={isActive ? "true" : undefined}
-              className={`relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[15px] leading-none transition ${
-                isActive
-                  ? "flux-btn-active bg-white/[0.1] text-white"
-                  : "text-white/45 hover:bg-white/[0.05] hover:text-white/80"
-              }`}
+              className={`flux-npanel-tab ${isActive ? "flux-npanel-tab--active" : ""}`}
             >
               <span aria-hidden>{tab.icon}</span>
               {badge !== undefined && badge !== "" && (
-                <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-white/90 px-0.5 text-[8px] font-bold leading-none text-black">
+                <span className="absolute -right-0.5 -top-0.5 min-w-[14px] rounded-sm bg-white/20 px-1 text-center font-mono text-[8px] leading-[14px] text-white/80">
                   {typeof badge === "number" && badge > 9 ? "9+" : badge}
                 </span>
               )}
@@ -110,11 +102,7 @@ export function PanelTabBar({
         onMouseEnter={(e) => showTooltip(e.currentTarget, "layout")}
         onFocus={(e) => showTooltip(e.currentTarget, "layout")}
         aria-label={layoutLabel}
-        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-sm transition ${
-          layoutMode === "stack"
-            ? "text-white/45 hover:bg-white/[0.05] hover:text-white/75"
-            : "flux-btn-active bg-white/[0.1] text-white"
-        }`}
+        className={`flux-npanel-tab ${layoutMode === "stack" ? "" : "flux-npanel-tab--active"}`}
       >
         <span aria-hidden>{layoutIcon}</span>
       </button>

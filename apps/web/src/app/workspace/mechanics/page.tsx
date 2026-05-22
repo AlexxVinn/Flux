@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { joinRoomBySlug } from "@/lib/rooms/api";
-import { commitRoomMembership } from "@/lib/rooms/session";
+import { prepareRoomJoinNavigation } from "@/lib/rooms/session";
 import { useAuthStore } from "@/store/authStore";
 
 /** Legacy URL — joins the public mechanics-default room then redirects. */
@@ -14,7 +14,7 @@ export default function LegacyMechanicsPage() {
   useEffect(() => {
     void joinRoomBySlug("mechanics-default", { anonymous: !user })
       .then((m) => {
-        commitRoomMembership(m, { anonymous: !user });
+        prepareRoomJoinNavigation(m, { anonymous: !user });
         router.replace(`/workspace/${m.module}/${m.slug}`);
       })
       .catch(() => router.replace("/"));

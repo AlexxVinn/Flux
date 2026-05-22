@@ -63,6 +63,7 @@ export interface Database {
           title: string;
           module: string;
           snapshot: Json;
+          is_public: boolean;
           created_at: string;
           updated_at: string;
         };
@@ -72,6 +73,7 @@ export interface Database {
           title: string;
           module?: string;
           snapshot: Json;
+          is_public?: boolean;
         };
         Update: Partial<Database["public"]["Tables"]["user_scenes"]["Insert"]>;
         Relationships: [];

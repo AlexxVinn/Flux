@@ -26,12 +26,32 @@ import {
   type VerletRope,
 } from "./ropeVerlet";
 import {
-  DEFAULT_SPRING_DAMPING,
-  DEFAULT_SPRING_STIFFNESS,
   SPRING_CONSTRAINT_ITERATIONS,
+  DEFAULT_SPRING_K_N_PER_M,
+  SPRING_ELASTIC_MAX_N_PER_M,
+  SPRING_ELASTIC_MIN_N_PER_M,
+  RIGID_BAR_K_N_PER_M,
+  RIGID_BAR_MATTER_DAMPING,
+  RIGID_BAR_MATTER_STIFFNESS,
+  inferElasticKnFromMatterConstraintStiffness,
+  matterConstraintDampingFromElasticKn,
+  matterConstraintStiffnessFromElasticKn,
 } from "./springDefaults";
 import { FLUX_WORLD } from "./worldSpace";
 import { COLLISION_BOX_DEFAULT_SIZE, COLLISION_FRAME_WALL_THICKNESS } from "./physicsConstants";
+import {
+  getSimulationQualityPreset,
+  type SimulationQualityMode,
+} from "./simulationQuality";
+import { unwrapAngleDelta } from "./transformGizmo";
+import {
+  METERS_PER_PIXEL,
+  STANDARD_GRAVITY_MPS2,
+  approximateNewtonSiFromMatterAppliedForceComponent,
+  matterMassToKg,
+  matterForceFromAccelPxPerSecSquared,
+  newtonComponentToMatterForce,
+} from "./units";
 
 export { COLLISION_BOX_DEFAULT_SIZE, COLLISION_FRAME_WALL_THICKNESS } from "./physicsConstants";
 
@@ -52,6 +72,8 @@ interface InternalBody {
   entityKind: EntityKind;
   displayName: string;
   visible: boolean;
+  locked: boolean;
+  showTrajectory: boolean;
   body: Matter.Body;
   width: number;
   height: number;
@@ -62,6 +84,9 @@ interface InternalSpring {
   id: string;
   displayName: string;
   visible: boolean;
+  locked: boolean;
+  /** SI \(k\) (N/m) for Hooke-style readouts/overlays — derived from stiffness when missing history. */
+  elasticConstantNnPerM: number;
   constraint: Matter.Constraint;
   bodyA: string;
   bodyB: string;
@@ -73,6 +98,7 @@ interface InternalRope {
   id: string;
   displayName: string;
   visible: boolean;
+  locked: boolean;
   bodyA: string;
   bodyB: string;
   anchorA: { x: number; y: number };
@@ -123,12 +149,37 @@ export class MatterSimulationEngine {
   private gravityEnabled = true;
   private gravityScale = 1;
   private lastCollisions: CollisionDebugPoint[] = [];
+  /**
+   * `lastCollisions` is computed in {@link step} for the physics tick — after {@link restoreCompact},
+   * scrub timeline, etc., the stale cache must be rebuilt. We sync lazily inside
+   * {@link getCollisionDebugPoints} with a bounded `Engine.update(..., 0)` when `tick` no longer matches.
+   */
+  private collisionDebugSyncedForTick = -2;
   private dragBodyId: string | null = null;
   private dragOffset = { x: 0, y: 0 };
   private dragPosition = { x: 0, y: 0 };
   private dragSleepThreshold: number | null = null;
   /** Linear / angular velocity before drag — restored on {@link endDrag}. */
   private dragSavedMotion: { vx: number; vy: number; av: number } | null = null;
+  /** Sustained user forces (Matter units), re-applied each step while sim plays. */
+  private userSustainedForces = new Map<string, { x: number; y: number }>();
+  /** Extra Matter solver passes + physics substeps (see UI quality modes). */
+  private simulationQuality: SimulationQualityMode = "standard";
+  /** Kinematic state at the start of the latest fixed physics step — for render interpolation (Max). */
+  private renderPrev: {
+    bodies: Map<
+      string,
+      {
+        x: number;
+        y: number;
+        angle: number;
+        velocityX: number;
+        velocityY: number;
+        angularVelocity: number;
+      }
+    >;
+    ropes: Map<string, { x: number; y: number }[]>;
+  } | null = null;
   tick = 0;
 
   constructor(options: MatterEngineOptions = {}) {
@@ -142,8 +193,21 @@ export class MatterSimulationEngine {
     });
     this.world = this.engine.world;
     this.engine.gravity.y = options.gravityY ?? 1;
-    this.engine.gravity.scale = 0.001 * this.gravityScale;
+    /** Gravity is applied manually each step ({@link applyCustomGravity}) so SI `g` stays consistent with overlays. */
+    this.engine.gravity.scale = 0;
     this.createBounds(this.worldWidth, this.worldHeight);
+    this.applySimulationQualityPreset();
+  }
+
+  private applySimulationQualityPreset(): void {
+    const preset = getSimulationQualityPreset(this.simulationQuality);
+    this.engine.enableSleeping = preset.enableSleeping;
+    const eng = this.engine as Matter.Engine & {
+      positionSlop?: number;
+      positionCorrection?: number;
+    };
+    eng.positionSlop = preset.positionSlop;
+    eng.positionCorrection = preset.positionCorrection;
   }
 
   private getSceneColliders(): Matter.Body[] {
@@ -162,6 +226,12 @@ export class MatterSimulationEngine {
 
   private invalidateColliderCache(): void {
     this.sceneCollidersCache = null;
+    this.invalidateCollisionDebugCache();
+  }
+
+  /** World moved without advancing {@link step} — drop collision-debug sync so the next getter refreshes pairs. */
+  private invalidateCollisionDebugCache(): void {
+    this.collisionDebugSyncedForTick = -2;
   }
 
   /** Rope tension uses applyForce; must be cleared when paused or before each step. */
@@ -175,9 +245,110 @@ export class MatterSimulationEngine {
     }
   }
 
-  private simulateVerletRopes(dtSec: number): void {
+  clearUserSustainedForces(): void {
+    this.userSustainedForces.clear();
+  }
+
+  /**
+   * Instantaneous kick in newtons (interpreted as Δv = F/m in SI, then applied in Matter’s
+   * velocity space — not the same as {@link newtonComponentToMatterForce} / `applyForce`).
+   */
+  applyImpulseNewtons(id: string, fxN: number, fyN: number): boolean {
+    const entry = this.bodies.get(id);
+    if (!entry || !entry.visible || entry.body.isStatic) return false;
+    if (entry.entityKind === "wall" || entry.entityKind === "floor") return false;
+    const m = entry.body.mass;
+    if (m <= 0) return false;
+    const mKg = matterMassToKg(m);
+    if (mKg <= 0) return false;
+    const dvxPxPs = fxN / mKg / METERS_PER_PIXEL;
+    const dvyPxPs = fyN / mKg / METERS_PER_PIXEL;
+    const cur = Matter.Body.getVelocity(entry.body);
+    Matter.Body.setVelocity(entry.body, {
+      x: cur.x + dvxPxPs,
+      y: cur.y + dvyPxPs,
+    });
+    Matter.Sleeping.set(entry.body, false);
+    return true;
+  }
+
+  /** Set or clear a sustained force (newtons) applied every simulation step. */
+  setSustainedForceNewtons(id: string, fxN: number, fyN: number): boolean {
+    const entry = this.bodies.get(id);
+    if (!entry || !entry.visible || entry.body.isStatic) return false;
+    if (entry.entityKind === "wall" || entry.entityKind === "floor") return false;
+    if (fxN === 0 && fyN === 0) {
+      this.userSustainedForces.delete(id);
+      return true;
+    }
+    this.userSustainedForces.set(id, {
+      x: newtonComponentToMatterForce(fxN),
+      y: newtonComponentToMatterForce(fyN),
+    });
+    Matter.Sleeping.set(entry.body, false);
+    return true;
+  }
+
+  getUserSustainedForcesNewtons(): Map<string, { x: number; y: number }> {
+    const out = new Map<string, { x: number; y: number }>();
+    for (const [id, f] of this.userSustainedForces) {
+      const entry = this.bodies.get(id);
+      const mm = entry?.body.mass ?? 0;
+      out.set(id, {
+        x: approximateNewtonSiFromMatterAppliedForceComponent(f.x, mm),
+        y: approximateNewtonSiFromMatterAppliedForceComponent(f.y, mm),
+      });
+    }
+    return out;
+  }
+
+  private applyUserSustainedForces(): void {
+    for (const [id, f] of this.userSustainedForces) {
+      const entry = this.bodies.get(id);
+      if (!entry || !entry.visible || entry.body.isStatic) continue;
+      Matter.Body.applyForce(entry.body, entry.body.position, f);
+    }
+  }
+
+  /**
+   * World gravity direction from `engine.gravity` (unit vector); magnitude follows SI
+   * `g = STANDARD_GRAVITY_MPS2 * gravityScale`, converted to px/s² (`a_px = g_SI / METERS_PER_PIXEL`).
+   */
+  private getWorldGravityAccelPxPerSec2(): { ax: number; ay: number } {
+    if (!this.gravityEnabled) return { ax: 0, ay: 0 };
     const g = this.engine.gravity;
-    const gravityY = this.gravityEnabled ? (g.y ?? 0) * (g.scale ?? 0.001) * 1000 * ROPE_GRAVITY_SCALE : 0;
+    const gx = g.x ?? 0;
+    const gy = g.y ?? 0;
+    const len = Math.hypot(gx, gy);
+    if (len < 1e-12) return { ax: 0, ay: 0 };
+    const ux = gx / len;
+    const uy = gy / len;
+    const aSi = STANDARD_GRAVITY_MPS2 * this.gravityScale;
+    const aPx = aSi / METERS_PER_PIXEL;
+    return { ax: ux * aPx, ay: uy * aPx };
+  }
+
+  /** Applies gravity so Matter’s F/m·Δt_ms² integration matches SI a in px/s². */
+  private applyCustomGravity(): void {
+    if (!this.gravityEnabled) return;
+    const { ax, ay } = this.getWorldGravityAccelPxPerSec2();
+    if (Math.abs(ax) < 1e-20 && Math.abs(ay) < 1e-20) return;
+    for (const ent of this.bodies.values()) {
+      if (!ent.visible || ent.body.isStatic) continue;
+      const bodyScale = this.getBodyGravityScale(ent.id);
+      if (bodyScale === 0) continue;
+      const m = ent.body.mass;
+      Matter.Body.applyForce(ent.body, ent.body.position, {
+        x: matterForceFromAccelPxPerSecSquared(m, bodyScale * ax),
+        y: matterForceFromAccelPxPerSecSquared(m, bodyScale * ay),
+      });
+    }
+  }
+
+  private simulateVerletRopes(dtSec: number): void {
+    const { ax: gax0, ay: gay0 } = this.getWorldGravityAccelPxPerSec2();
+    const gravityX = gax0 * ROPE_GRAVITY_SCALE;
+    const gravityY = gay0 * ROPE_GRAVITY_SCALE;
     const baseColliders = this.getSceneColliders();
     const subDt = dtSec / ROPE_VERLET_SUBSTEPS;
     const lastSub = ROPE_VERLET_SUBSTEPS - 1;
@@ -196,7 +367,7 @@ export class MatterSimulationEngine {
         const exclude = new Set([labelA, labelB]);
 
         const ctx: RopeSimContext = {
-          gravityX: (g.x ?? 0) * (g.scale ?? 0.001) * 1000 * ROPE_GRAVITY_SCALE,
+          gravityX,
           gravityY,
           colliders: baseColliders,
           excludeLabels: exclude,
@@ -466,6 +637,8 @@ export class MatterSimulationEngine {
       entityKind,
       displayName,
       visible: true,
+      locked: false,
+      showTrajectory: false,
       body,
       width,
       height,
@@ -481,7 +654,9 @@ export class MatterSimulationEngine {
       length?: number;
       stiffness?: number;
       damping?: number;
+      elasticConstantNnPerM?: number;
       id?: string;
+      displayName?: string;
       pointA?: { x: number; y: number };
       pointB?: { x: number; y: number };
     },
@@ -497,25 +672,55 @@ export class MatterSimulationEngine {
     const dist =
       options?.length ?? Math.max(20, Math.hypot(wB.x - wA.x, wB.y - wA.y));
 
+    const stiffnessOpt =
+      typeof options?.stiffness === "number" && Number.isFinite(options.stiffness) && options.stiffness >= 1e-4
+        ? options.stiffness
+        : undefined;
+    const dampingOpt =
+      typeof options?.damping === "number" && Number.isFinite(options.damping) ? options.damping : undefined;
+    const explicitElastic =
+      typeof options?.elasticConstantNnPerM === "number" && Number.isFinite(options.elasticConstantNnPerM)
+        ? Math.min(
+            SPRING_ELASTIC_MAX_N_PER_M,
+            Math.max(SPRING_ELASTIC_MIN_N_PER_M, options.elasticConstantNnPerM),
+          )
+        : undefined;
+
+    const elasticNn =
+      explicitElastic !== undefined
+        ? explicitElastic
+        : stiffnessOpt !== undefined
+          ? inferElasticKnFromMatterConstraintStiffness(stiffnessOpt)
+          : DEFAULT_SPRING_K_N_PER_M;
+
+    const matterStiff =
+      stiffnessOpt !== undefined ? stiffnessOpt : matterConstraintStiffnessFromElasticKn(elasticNn);
+    const matterDamp =
+      dampingOpt !== undefined
+        ? dampingOpt
+        : matterConstraintDampingFromElasticKn(elasticNn, matterStiff);
+
     const id =
       typeof options?.id === "string" && options.id.length > 0
         ? options.id
         : crypto.randomUUID();
     if (options?.id && options.id.length > 0) this.bumpCounterIfNumericSuffix(options.id);
-    const displayName = nextEntityName("spring");
+    const displayName = options?.displayName ?? nextEntityName("spring");
     const constraint = Matter.Constraint.create({
       bodyA: a.body,
       bodyB: b.body,
       pointA,
       pointB,
       length: Math.max(dist, 20),
-      stiffness: options?.stiffness ?? DEFAULT_SPRING_STIFFNESS,
-      damping: options?.damping ?? DEFAULT_SPRING_DAMPING,
+      stiffness: matterStiff,
+      damping: matterDamp,
     });
     this.springs.set(id, {
       id,
       displayName,
       visible: true,
+      locked: false,
+      elasticConstantNnPerM: elasticNn,
       constraint,
       bodyA: bodyAId,
       bodyB: bodyBId,
@@ -524,6 +729,25 @@ export class MatterSimulationEngine {
     });
     Matter.World.add(this.world, constraint);
     return id;
+  }
+
+  connectRigidBar(
+    bodyAId: string,
+    bodyBId: string,
+    options?: {
+      length?: number;
+      id?: string;
+      pointA?: { x: number; y: number };
+      pointB?: { x: number; y: number };
+    },
+  ): string | null {
+    return this.connectSpring(bodyAId, bodyBId, {
+      ...options,
+      stiffness: RIGID_BAR_MATTER_STIFFNESS,
+      damping: RIGID_BAR_MATTER_DAMPING,
+      elasticConstantNnPerM: RIGID_BAR_K_N_PER_M,
+      displayName: nextEntityName("bar"),
+    });
   }
 
   connectRope(
@@ -598,6 +822,7 @@ export class MatterSimulationEngine {
       id,
       displayName,
       visible: true,
+      locked: false,
       bodyA: bodyAId,
       bodyB: bodyBId,
       anchorA: { ...pointA },
@@ -653,6 +878,12 @@ export class MatterSimulationEngine {
       return true;
     }
     return false;
+  }
+
+  setBodyShowTrajectory(id: string, showTrajectory: boolean): void {
+    const entry = this.bodies.get(id);
+    if (!entry || entry.showTrajectory === showTrajectory) return;
+    entry.showTrajectory = showTrajectory;
   }
 
   setBodyVisible(id: string, visible: boolean): void {
@@ -715,6 +946,30 @@ export class MatterSimulationEngine {
     else this.setBoundVisible(id, visible);
   }
 
+  setBodyLocked(id: string, locked: boolean): void {
+    const entry = this.bodies.get(id);
+    if (!entry || entry.locked === locked) return;
+    entry.locked = locked;
+  }
+
+  setSpringLocked(id: string, locked: boolean): void {
+    const spring = this.springs.get(id);
+    if (!spring || spring.locked === locked) return;
+    spring.locked = locked;
+  }
+
+  setRopeLocked(id: string, locked: boolean): void {
+    const rope = this.ropes.get(id);
+    if (!rope || rope.locked === locked) return;
+    rope.locked = locked;
+  }
+
+  setEntityLocked(id: string, locked: boolean): void {
+    if (this.bodies.has(id)) this.setBodyLocked(id, locked);
+    else if (this.springs.has(id)) this.setSpringLocked(id, locked);
+    else if (this.ropes.has(id)) this.setRopeLocked(id, locked);
+  }
+
   isEntityVisible(id: string): boolean {
     const b = this.bodies.get(id);
     if (b) return b.visible;
@@ -768,6 +1023,7 @@ export class MatterSimulationEngine {
     if (wasCollision && !this.hasCollisionBounds()) {
       this.recreateOuterWalls();
     }
+    this.invalidateColliderCache();
   }
 
   setBodyPosition(
@@ -785,6 +1041,7 @@ export class MatterSimulationEngine {
       Matter.Body.setAngularVelocity(entry.body, 0);
     }
     Matter.Sleeping.set(entry.body, false);
+    this.invalidateCollisionDebugCache();
   }
 
   setBodyMotion(id: string, vx: number, vy: number, av: number): void {
@@ -794,6 +1051,7 @@ export class MatterSimulationEngine {
     Matter.Body.setVelocity(entry.body, { x: vx, y: vy });
     Matter.Body.setAngularVelocity(entry.body, av);
     Matter.Sleeping.set(entry.body, false);
+    this.invalidateCollisionDebugCache();
   }
 
   /** Resize dynamic shapes (boxes/circles). Circles use diameter = max(width, height). */
@@ -826,6 +1084,7 @@ export class MatterSimulationEngine {
     entry.width = w;
     entry.height = h;
     Matter.Sleeping.set(b, false);
+    this.invalidateCollisionDebugCache();
   }
 
   beginDrag(id: string, pointerX: number, pointerY: number): void {
@@ -893,6 +1152,7 @@ export class MatterSimulationEngine {
     Matter.Body.setVelocity(entry.body, { x: 0, y: 0 });
     Matter.Body.setAngularVelocity(entry.body, 0);
     Matter.Sleeping.set(entry.body, false);
+    this.invalidateCollisionDebugCache();
   }
 
   updateRopeProps(
@@ -911,14 +1171,47 @@ export class MatterSimulationEngine {
 
   updateSpringProps(
     id: string,
-    props: { stiffness?: number; damping?: number; length?: number },
+    props: {
+      stiffness?: number;
+      damping?: number;
+      length?: number;
+      elasticConstantNnPerM?: number;
+    },
   ): void {
     const spring = this.springs.get(id);
     if (!spring || !spring.visible) return;
     const c = spring.constraint;
-    if (props.stiffness !== undefined) c.stiffness = props.stiffness;
-    if (props.damping !== undefined) c.damping = props.damping;
+
+    const hasElasticPatch =
+      typeof props.elasticConstantNnPerM === "number" &&
+      Number.isFinite(props.elasticConstantNnPerM);
+    const hasStiffPatch =
+      typeof props.stiffness === "number" && Number.isFinite(props.stiffness);
+    const hasDampPatch = typeof props.damping === "number" && Number.isFinite(props.damping);
+
+    if (hasElasticPatch) {
+      spring.elasticConstantNnPerM = Math.min(
+        SPRING_ELASTIC_MAX_N_PER_M,
+        Math.max(SPRING_ELASTIC_MIN_N_PER_M, props.elasticConstantNnPerM!),
+      );
+      const matterStiff = matterConstraintStiffnessFromElasticKn(spring.elasticConstantNnPerM);
+      c.stiffness = matterStiff;
+      c.damping = matterConstraintDampingFromElasticKn(spring.elasticConstantNnPerM, matterStiff);
+    } else if (hasStiffPatch) {
+      c.stiffness = props.stiffness!;
+      spring.elasticConstantNnPerM = inferElasticKnFromMatterConstraintStiffness(c.stiffness);
+      c.damping = matterConstraintDampingFromElasticKn(
+        spring.elasticConstantNnPerM,
+        c.stiffness,
+      );
+    }
+
+    if (hasDampPatch) {
+      c.damping = props.damping!;
+    }
+
     if (props.length !== undefined) c.length = Math.max(props.length, 20);
+
     const a = this.bodies.get(spring.bodyA);
     const b = this.bodies.get(spring.bodyB);
     if (a?.visible) Matter.Sleeping.set(a.body, false);
@@ -975,8 +1268,10 @@ export class MatterSimulationEngine {
   setGravity(enabled: boolean, scale = 1): void {
     this.gravityEnabled = enabled;
     this.gravityScale = scale;
+    this.engine.gravity.x = 0;
     this.engine.gravity.y = enabled ? 1 : 0;
-    this.engine.gravity.scale = enabled ? 0.001 * scale : 0;
+    /** Unused for integration when 0 — strength is {@link gravityScale} × SI g. */
+    this.engine.gravity.scale = 0;
   }
 
   isGravityEnabled(): boolean {
@@ -988,12 +1283,12 @@ export class MatterSimulationEngine {
     if (!entry || !this.gravityEnabled || entry.body.isStatic || !entry.visible) {
       return { x: 0, y: 0 };
     }
-    const g = this.engine.gravity;
-    const scale = g.scale ?? 0.001;
     const bodyScale = this.getBodyGravityScale(id);
+    const { ax, ay } = this.getWorldGravityAccelPxPerSec2();
+    const m = entry.body.mass;
     return {
-      x: entry.body.mass * (g.x ?? 0) * scale * 1000 * bodyScale,
-      y: entry.body.mass * (g.y ?? 0) * scale * 1000 * bodyScale,
+      x: matterForceFromAccelPxPerSecSquared(m, bodyScale * ax),
+      y: matterForceFromAccelPxPerSecSquared(m, bodyScale * ay),
     };
   }
 
@@ -1008,6 +1303,16 @@ export class MatterSimulationEngine {
       const normal = collision?.normal;
       const nx = normal?.x ?? 0;
       const ny = normal?.y ?? 0;
+      const bA = pair.bodyA ?? collision?.bodyA;
+      const bB = pair.bodyB ?? collision?.bodyB;
+      const idA =
+        typeof bA?.parent === "object" && bA.parent
+          ? String((bA.parent as Matter.Body).label ?? "")
+          : String(bA?.label ?? "");
+      const idB =
+        typeof bB?.parent === "object" && bB.parent
+          ? String((bB.parent as Matter.Body).label ?? "")
+          : String(bB?.label ?? "");
 
       for (let j = 0; j < pair.contactCount; j++) {
         const vertex = pair.contacts[j]?.vertex;
@@ -1017,6 +1322,10 @@ export class MatterSimulationEngine {
           y: vertex.y,
           nx,
           ny,
+          ...(idA ? { bodyA: idA } : {}),
+          ...(idB ? { bodyB: idB } : {}),
+          frictionMixed: pair.friction,
+          frictionStaticMixed: pair.frictionStatic,
         });
       }
     }
@@ -1024,29 +1333,127 @@ export class MatterSimulationEngine {
   }
 
   getCollisionDebugPoints(): CollisionDebugPoint[] {
+    if (this.collisionDebugSyncedForTick !== this.tick) {
+      Matter.Engine.update(this.engine, 0);
+      this.collectCollisions();
+      this.collisionDebugSyncedForTick = this.tick;
+    }
     return this.lastCollisions;
+  }
+
+  setSimulationQuality(mode: SimulationQualityMode): void {
+    this.simulationQuality = mode;
+    this.applySimulationQualityPreset();
+    this.renderPrev = null;
+  }
+
+  getSimulationQuality(): SimulationQualityMode {
+    return this.simulationQuality;
+  }
+
+  /** Call immediately before each fixed physics step when using render interpolation. */
+  beginFixedPhysicsStep(): void {
+    const bodies = new Map<
+      string,
+      {
+        x: number;
+        y: number;
+        angle: number;
+        velocityX: number;
+        velocityY: number;
+        angularVelocity: number;
+      }
+    >();
+    for (const ent of this.bodies.values()) {
+      if (!ent.visible || ent.entityKind === "ropeSegment") continue;
+      const b = ent.body;
+      bodies.set(ent.id, {
+        x: b.position.x,
+        y: b.position.y,
+        angle: b.angle,
+        velocityX: b.velocity.x,
+        velocityY: b.velocity.y,
+        angularVelocity: b.angularVelocity,
+      });
+    }
+    const ropes = new Map<string, { x: number; y: number }[]>();
+    for (const rope of this.ropes.values()) {
+      if (!rope.visible) continue;
+      ropes.set(
+        rope.id,
+        rope.verlet.particles.map((p) => ({ x: p.x, y: p.y })),
+      );
+    }
+    this.renderPrev = { bodies, ropes };
+  }
+
+  /**
+   * Display-only blend between the previous and current fixed physics states.
+   * Authoritative {@link snapshot} / timeline data stay on the integrated state.
+   */
+  interpolateSnapshotForRender(current: SimulationSnapshot, alpha: number): SimulationSnapshot {
+    const prev = this.renderPrev;
+    if (!prev || alpha <= 0 || alpha >= 1) return current;
+
+    const bodies = current.bodies.map((b) => {
+      if (b.isStatic || b.visible === false || b.entityKind === "ropeSegment") return b;
+      const p = prev.bodies.get(b.id);
+      if (!p) return b;
+      const t = alpha;
+      const angle = p.angle + unwrapAngleDelta(p.angle, b.angle) * t;
+      return {
+        ...b,
+        x: p.x + (b.x - p.x) * t,
+        y: p.y + (b.y - p.y) * t,
+        angle,
+        velocityX: p.velocityX + (b.velocityX - p.velocityX) * t,
+        velocityY: p.velocityY + (b.velocityY - p.velocityY) * t,
+        angularVelocity: p.angularVelocity + (b.angularVelocity - p.angularVelocity) * t,
+      };
+    });
+
+    const ropes = (current.ropes ?? []).map((r) => {
+      const pPts = prev.ropes.get(r.id);
+      const cPts = r.particles;
+      if (!pPts || !cPts || pPts.length !== cPts.length) return r;
+      const t = alpha;
+      const particles = cPts.map((c, i) => {
+        const p = pPts[i]!;
+        return { x: p.x + (c.x - p.x) * t, y: p.y + (c.y - p.y) * t };
+      });
+      return { ...r, particles };
+    });
+
+    return { ...current, bodies, ropes };
   }
 
   step(dtMs: number, timeScale = 1): void {
     const scaledDt = dtMs * timeScale;
+    const preset = getSimulationQualityPreset(this.simulationQuality);
+    const substeps = preset.substeps;
+    const dtSecRopeSlice = scaledDt / substeps / 1000;
     const hasRopes = this.ropes.size > 0;
 
     this.engine.constraintIterations = SPRING_CONSTRAINT_ITERATIONS;
-    this.engine.positionIterations = 8;
-    this.engine.velocityIterations = 6;
+    this.engine.positionIterations = preset.positionIterations;
+    this.engine.velocityIterations = preset.velocityIterations;
 
-    const stepMs = scaledDt;
-    const dtSec = stepMs / 1000;
+    const subMs = scaledDt / substeps;
 
-    this.clearBodyForces();
-    if (hasRopes) {
-      this.simulateVerletRopes(dtSec);
+    for (let s = 0; s < substeps; s++) {
+      this.clearBodyForces();
+      if (hasRopes) {
+        this.simulateVerletRopes(dtSecRopeSlice);
+      }
+      this.applyUserSustainedForces();
+      this.applyCustomGravity();
+      Matter.Engine.update(this.engine, subMs);
     }
-    Matter.Engine.update(this.engine, stepMs);
 
     if (this.dragBodyId) this.applyDragPin();
     this.collectCollisions();
     this.tick += 1;
+    this.collisionDebugSyncedForTick = this.tick;
   }
 
   stepOnce(dtMs = 16.667, timeScale = 1): void {
@@ -1055,6 +1462,7 @@ export class MatterSimulationEngine {
 
   setTick(tick: number): void {
     this.tick = tick;
+    this.invalidateCollisionDebugCache();
   }
 
   restoreCompact(
@@ -1077,6 +1485,7 @@ export class MatterSimulationEngine {
       Matter.Body.setAngularVelocity(b, 0);
       Matter.Sleeping.set(b, false);
     }
+    this.invalidateCollisionDebugCache();
   }
 
   private ropeAnchorWorld(rope: InternalRope): {
@@ -1141,6 +1550,7 @@ export class MatterSimulationEngine {
         reinitializeVerletRope(rope.verlet, surfA, surfB);
       }
     }
+    this.invalidateCollisionDebugCache();
   }
 
   reset(width: number, height: number): void {
@@ -1148,6 +1558,7 @@ export class MatterSimulationEngine {
     this.bodies.clear();
     this.springs.clear();
     this.ropes.clear();
+    this.userSustainedForces.clear();
     this.invalidateColliderCache();
     this.bounds = [];
     this.tick = 0;
@@ -1188,6 +1599,8 @@ export class MatterSimulationEngine {
       sleepThreshold: b.sleepThreshold,
       isStatic: b.isStatic,
       visible: entry.visible,
+      locked: entry.locked,
+      showTrajectory: entry.showTrajectory,
       gravityScale: plugin?.fluxGravityScale ?? 1,
       isSleeping: b.isSleeping,
       width: entry.width,
@@ -1236,10 +1649,12 @@ export class MatterSimulationEngine {
       displayName: s.displayName,
       bodyA: s.bodyA,
       bodyB: s.bodyB,
+      elasticConstantNnPerM: s.elasticConstantNnPerM,
       stiffness: s.constraint.stiffness ?? 0,
       damping: s.constraint.damping ?? 0,
       length: s.constraint.length ?? 0,
       visible: s.visible,
+      locked: s.locked,
       anchorA: { ...s.anchorA },
       anchorB: { ...s.anchorB },
     }));
@@ -1254,6 +1669,7 @@ export class MatterSimulationEngine {
       linkStiffness: r.linkStiffness,
       linkDamping: r.linkDamping,
       visible: r.visible,
+      locked: r.locked,
       particles: r.verlet.particles.map((p) => ({ x: p.x, y: p.y })),
       segmentLength: r.verlet.segmentLength,
     }));
@@ -1318,6 +1734,8 @@ export class MatterSimulationEngine {
         gravityScale: b.gravityScale,
       });
       if (b.visible === false) this.setBodyVisible(b.id, false);
+      if (b.locked) this.setBodyLocked(b.id, true);
+      if (b.showTrajectory) this.setBodyShowTrajectory(b.id, true);
     }
 
     for (const s of snap.springs) {
@@ -1327,11 +1745,13 @@ export class MatterSimulationEngine {
         stiffness: s.stiffness,
         damping: s.damping,
         length: s.length > 0 ? s.length : undefined,
+        elasticConstantNnPerM: s.elasticConstantNnPerM,
         id: s.id,
         pointA: s.anchorA ?? { x: 0, y: 0 },
         pointB: s.anchorB ?? { x: 0, y: 0 },
       });
       if (s.visible === false) this.setSpringVisible(s.id, false);
+      if (s.locked) this.setSpringLocked(s.id, true);
     }
 
     const ropes = snap.ropes ?? [];
@@ -1348,6 +1768,7 @@ export class MatterSimulationEngine {
         pointB: r.anchorB,
       });
       if (r.visible === false) this.setRopeVisible(r.id, false);
+      if (r.locked) this.setRopeLocked(r.id, true);
     }
   }
 
